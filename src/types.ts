@@ -1,0 +1,78 @@
+export type Severity = 'LOW' | 'ELEVATED' | 'CRITICAL' | 'CATASTROPHIC'
+
+export type IncidentPhase = {
+  id: string
+  label: string
+  durationSeconds: number
+  objective: string
+  alerts: string[]
+  reportIds: string[]
+}
+
+export type Resource = {
+  id: string
+  label: string
+  value: number
+  unit: string
+  icon: string
+  color: string
+}
+
+export type SituationReport = {
+  id: string
+  classification: string
+  heading: string
+  body: string
+  recommendation: string
+  confidence: number
+}
+
+export type MapMarker = {
+  id: string
+  label: string
+  x: number
+  y: number
+  tone: 'alert' | 'unit' | 'neutral'
+}
+
+export type Scenario = {
+  id: string
+  title: string
+  premise: string
+  severity: Severity
+  durationSeconds: number
+  phases: IncidentPhase[]
+  resources: Resource[]
+  reports: SituationReport[]
+  markers: MapMarker[]
+  resolution: string
+  accents: [string, string]
+}
+
+export type TimelineEvent = {
+  id: string
+  time: string
+  label: string
+  detail: string
+  tone: 'alert' | 'info' | 'success'
+}
+
+export type ActiveIncident = {
+  scenario: Scenario
+  startedAt: number
+  elapsedSeconds: number
+  phaseIndex: number
+  events: TimelineEvent[]
+  resolved: boolean
+  exitReason?: 'AUTO_DISMISSED' | 'EMERGENCY_EXIT' | 'RESOLVED'
+  endedAt?: number
+}
+
+export type Settings = {
+  triggerLabel: string
+  durationSeconds: number
+  soundEnabled: boolean
+  reducedMotion: boolean
+  alwaysOnTop: boolean
+  autoStart: boolean
+}
