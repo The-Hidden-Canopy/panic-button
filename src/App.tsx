@@ -1,9 +1,10 @@
 import { useEffect, useRef, useState, type CSSProperties } from 'react'
 import { scenarios as builtInScenarios } from './data/scenarios'
 import { createIncident, formatDuration, getPhaseIndex, makeEvent, scaleScenarioDuration } from './lib/incidentEngine'
-import { packFromScenarios, parseScenarioPack, validateScenario } from './lib/packValidator'
+import { MAX_PACK_BYTES, packFromScenarios, parseScenarioPack, validateScenario } from './lib/packValidator'
 import { registerGlobalTrigger, setTheaterMode } from './lib/native'
-import { downloadJson, loadReplays, loadScenarioDrafts, loadSettings, saveReplay, saveScenarioDraft, saveSettings } from './lib/storage'
+import { clearActiveRunMarker, downloadJson, loadActiveRunMarker, loadReplays, loadScenarioDrafts, loadSettings, saveReplay, saveScenarioDraft, saveSettings, writeActiveRunMarker } from './lib/storage'
+import { createTriggerGuard } from './lib/triggerGuard'
 import type { ActiveIncident, ReplayRecord, Scenario, Settings, ValidationIssue } from './types'
 
 type View = 'command' | 'timeline' | 'reports' | 'editor' | 'settings'
@@ -15,6 +16,7 @@ const defaultSettings: Settings = {
   reducedMotion: false,
   alwaysOnTop: true,
   autoStart: false,
+  cooldownSeconds: 5,
 }
 
 const readSettings = (): Settings => loadSettings(defaultSettings)
@@ -44,8 +46,10 @@ const playAlert = (enabled: boolean) => {
 const pickScenario = (items: Scenario[]) => items[Math.floor(Math.random() * items.length)] ?? items[0]
 
 const replayRecord = (incident: ActiveIncident): ReplayRecord => ({ ...incident, id: `run-${incident.startedAt}`, savedAt: Date.now() })
+const recoveredReplay = (incident: ActiveIncident): ReplayRecord => replayRecord({ ...incident, resolved: true, exitReason: 'ERROR', endedAt: Date.now() })
 
 function App() {
+  const [recoveryRun] = useState(() => loadActiveRunMarker())
   const [settings, setSettings] = useState<Settings>(readSettings)
   const [scenarios, setScenarios] = useState<Scenario[]>(() => {
     const drafts = new Map(loadScenarioDrafts().map((scenario) => [scenario.id, scenario]))
@@ -56,22 +60,30 @@ function App() {
   const [incident, setIncident] = useState<ActiveIncident | null>(null)
   const [view, setView] = useState<View>('command')
   const [selectedScenarioId, setSelectedScenarioId] = useState(builtInScenarios[0].id)
-  const [notice, setNotice] = useState('SYSTEM NOMINAL // AWAITING MUNDANE CRISIS')
-  const [lastReplay, setLastReplay] = useState<ActiveIncident | null>(() => loadReplays()[0] ?? null)
+  const [notice, setNotice] = useState(recoveryRun ? 'RECOVERY MODE // PREVIOUS INCIDENT MARKED ABORTED' : 'SYSTEM NOMINAL // AWAITING MUNDANE CRISIS')
+  const [lastReplay, setLastReplay] = useState<ActiveIncident | null>(() => recoveryRun ? recoveredReplay(recoveryRun) : loadReplays()[0] ?? null)
   const [packIssues, setPackIssues] = useState<ValidationIssue[]>([])
   const editorScenario = scenarios.find((scenario) => scenario.id === selectedScenarioId) ?? scenarios[0]
   const triggerRef = useRef<() => void>(() => undefined)
   const incidentRef = useRef<ActiveIncident | null>(null)
   const exitRef = useRef<(reason: ActiveIncident['exitReason']) => void>(() => undefined)
+  const triggerGuardRef = useRef(createTriggerGuard())
 
   const startSpecificIncident = (scenario: Scenario) => {
+    const now = Date.now()
+    if (!triggerGuardRef.current.tryAccept(now, Boolean(incidentRef.current && !incidentRef.current.resolved))) {
+      setNotice('TRIGGER HELD // ACTIVE INCIDENT OR COOLDOWN IN EFFECT')
+      return false
+    }
     const next = createIncident(scaleScenarioDuration(scenario, settings.durationSeconds))
     setIncident(next)
+    writeActiveRunMarker(next)
     setLastReplay(null)
     setView('command')
     setNotice('ALERT DISPATCHED // ALL AVAILABLE RESOURCES ALLOCATED')
     playAlert(settings.soundEnabled)
     void setTheaterMode(true, settings.alwaysOnTop)
+    return true
   }
 
   const startIncident = () => {
@@ -84,6 +96,8 @@ function App() {
       const completed = { ...current, resolved: true, exitReason: reason, endedAt: Date.now() }
       setLastReplay(completed)
       saveReplay(replayRecord(completed))
+      clearActiveRunMarker()
+      triggerGuardRef.current.startCooldown(Date.now(), settings.cooldownSeconds * 1000)
       void setTheaterMode(false, false)
       setNotice(reason === 'EMERGENCY_EXIT' ? 'EMERGENCY EXIT // THE SITUATION HAS BEEN CONTAINED' : 'INCIDENT CLOSED // NO FURTHER ACTION REQUIRED')
       return completed
@@ -120,6 +134,21 @@ function App() {
   }, [])
 
   useEffect(() => {
+    if (!recoveryRun) return
+    saveReplay(recoveredReplay(recoveryRun))
+    clearActiveRunMarker()
+  }, [recoveryRun])
+
+  useEffect(() => {
+    const preserveRecoveryMarker = () => {
+      const current = incidentRef.current
+      if (current && !current.resolved) writeActiveRunMarker(current)
+    }
+    window.addEventListener('beforeunload', preserveRecoveryMarker)
+    return () => window.removeEventListener('beforeunload', preserveRecoveryMarker)
+  }, [])
+
+  useEffect(() => {
     if (!incident || incident.resolved) return undefined
     const timer = window.setInterval(() => {
       setIncident((current) => {
@@ -136,15 +165,19 @@ function App() {
           const completed = { ...current, elapsedSeconds, phaseIndex, events, resolved: true, exitReason: 'AUTO_DISMISSED' as const }
           setLastReplay(completed)
           saveReplay(replayRecord(completed))
+          clearActiveRunMarker()
+          triggerGuardRef.current.startCooldown(Date.now(), settings.cooldownSeconds * 1000)
           void setTheaterMode(false, false)
           setNotice('AUTO-DISPATCH COMPLETE // PIZZA-CLASS THREAT RETURNED TO BASELINE')
           return completed
         }
-        return { ...current, elapsedSeconds, phaseIndex, events }
+        const updated = { ...current, elapsedSeconds, phaseIndex, events }
+        writeActiveRunMarker(updated)
+        return updated
       })
     }, 1000)
     return () => window.clearInterval(timer)
-  }, [incident?.resolved, incident?.startedAt, settings.soundEnabled])
+  }, [incident?.resolved, incident?.startedAt, settings.cooldownSeconds, settings.soundEnabled])
 
   useEffect(() => {
     saveSettings(settings)
@@ -175,6 +208,11 @@ function App() {
   }
 
   const importPack = async (file: File) => {
+    if (file.size > MAX_PACK_BYTES) {
+      setPackIssues([{ path: 'pack', message: `Pack exceeds the ${MAX_PACK_BYTES.toLocaleString()} byte safety limit.`, severity: 'error' }])
+      setNotice('PACK REJECTED // FILE TOO LARGE')
+      return
+    }
     const result = parseScenarioPack(await file.text())
     setPackIssues(result.issues)
     if (!result.pack) {
@@ -224,7 +262,7 @@ function App() {
           <button className="panic-button" onClick={startIncident} aria-label="Trigger a random panic incident">
             <span className="panic-button-inner"><span className="panic-icon">!</span><span>TRIGGER<br />INCIDENT</span></span>
           </button>
-          <div className="build-stamp">HC // PB-0.1.0<br />LOCAL / OFFLINE / SIMULATED</div>
+          <div className="build-stamp">HC // PB-0.2.0<br />LOCAL / OFFLINE / SIMULATED</div>
         </div>
       </aside>
 
@@ -293,11 +331,11 @@ function EditorView({ scenario, scenarios, selectedId, issues, onSelect, onUpdat
   const [jsonOpen, setJsonOpen] = useState(false)
   const fileInput = useRef<HTMLInputElement>(null)
   const save = () => { if (onSave()) { setSaved(true); window.setTimeout(() => setSaved(false), 1600) } }
-  return <div className="single-column"><section className="panel editor-panel"><PanelHeader title="SCENARIO LAB" tag="LOCAL AUTHORING" /><div className="editor-toolbar"><div><span className="tiny-label">SCENARIO PACK</span><select value={selectedId} onChange={(event) => onSelect(event.target.value)}>{scenarios.map((item) => <option value={item.id} key={item.id}>{item.title}</option>)}</select></div><div className="editor-actions"><input ref={fileInput} type="file" accept="application/json,.json" hidden onChange={(event) => { const file = event.target.files?.[0]; if (file) onImport(file); event.target.value = '' }} /><button className="secondary-button" onClick={() => fileInput.current?.click()}>IMPORT PACK</button><button className="secondary-button" onClick={onExport}>EXPORT PACK</button><button className="secondary-button" onClick={() => setJsonOpen(!jsonOpen)}>{jsonOpen ? 'HIDE JSON' : 'VIEW JSON'}</button><button className="secondary-button" onClick={onPreview}>PREVIEW INCIDENT</button><button className="primary-button small" onClick={save}>{saved ? 'SAVED ✓' : 'SAVE DRAFT'}</button></div></div><div className="editor-grid"><label><span>TITLE</span><input value={scenario.title} onChange={(event) => onUpdate({ title: event.target.value.toUpperCase() })} /></label><label><span>SEVERITY</span><select value={scenario.severity} onChange={(event) => onUpdate({ severity: event.target.value as Scenario['severity'] })}><option>LOW</option><option>ELEVATED</option><option>CRITICAL</option><option>CATASTROPHIC</option></select></label><label className="wide"><span>PREMISE</span><textarea value={scenario.premise} onChange={(event) => onUpdate({ premise: event.target.value })} rows={3} /></label><label><span>DURATION (SECONDS)</span><input type="number" min="15" max="300" value={scenario.durationSeconds} onChange={(event) => onUpdate({ durationSeconds: Math.max(15, Math.min(300, Number(event.target.value))) })} /></label><label><span>RESOLUTION</span><input value={scenario.resolution} onChange={(event) => onUpdate({ resolution: event.target.value })} /></label></div>{issues.length > 0 && <div className="validation-box"><strong>PACK VALIDATION</strong>{issues.map((item) => <div className={item.severity} key={`${item.path}-${item.message}`}>{item.path}: {item.message}</div>)}</div>}{jsonOpen && <pre className="json-preview">{JSON.stringify(scenario, null, 2)}</pre>}<div className="editor-note"><span>ⓘ</span><p>Scenario packs are local JSON. Executable code, external URLs, arbitrary paths, and unsafe assets are rejected by the pack validator before activation.</p></div></section></div>
+  return <div className="single-column"><section className="panel editor-panel"><PanelHeader title="SCENARIO LAB" tag="LOCAL AUTHORING" /><div className="editor-toolbar"><div><span className="tiny-label">SCENARIO PACK</span><select value={selectedId} onChange={(event) => onSelect(event.target.value)}>{scenarios.map((item) => <option value={item.id} key={item.id}>{item.title}</option>)}</select></div><div className="editor-actions"><input ref={fileInput} type="file" accept="application/json,.json,.panicpack" hidden onChange={(event) => { const file = event.target.files?.[0]; if (file) onImport(file); event.target.value = '' }} /><button className="secondary-button" onClick={() => fileInput.current?.click()}>IMPORT PACK</button><button className="secondary-button" onClick={onExport}>EXPORT PACK</button><button className="secondary-button" onClick={() => setJsonOpen(!jsonOpen)}>{jsonOpen ? 'HIDE JSON' : 'VIEW JSON'}</button><button className="secondary-button" onClick={onPreview}>PREVIEW INCIDENT</button><button className="primary-button small" onClick={save}>{saved ? 'SAVED ✓' : 'SAVE DRAFT'}</button></div></div><div className="editor-grid"><label><span>TITLE</span><input value={scenario.title} onChange={(event) => onUpdate({ title: event.target.value.toUpperCase() })} /></label><label><span>SEVERITY</span><select value={scenario.severity} onChange={(event) => onUpdate({ severity: event.target.value as Scenario['severity'] })}><option>LOW</option><option>ELEVATED</option><option>CRITICAL</option><option>CATASTROPHIC</option></select></label><label className="wide"><span>PREMISE</span><textarea value={scenario.premise} onChange={(event) => onUpdate({ premise: event.target.value })} rows={3} /></label><label><span>DURATION (SECONDS)</span><input type="number" min="15" max="300" value={scenario.durationSeconds} onChange={(event) => onUpdate({ durationSeconds: Math.max(15, Math.min(300, Number(event.target.value))) })} /></label><label><span>RESOLUTION</span><input value={scenario.resolution} onChange={(event) => onUpdate({ resolution: event.target.value })} /></label></div>{issues.length > 0 && <div className="validation-box"><strong>PACK VALIDATION</strong>{issues.map((item) => <div className={item.severity} key={`${item.path}-${item.message}`}>{item.path}: {item.message}</div>)}</div>}{jsonOpen && <pre className="json-preview">{JSON.stringify(scenario, null, 2)}</pre>}<div className="editor-note"><span>ⓘ</span><p>Scenario packs are local JSON. Executable code, external URLs, arbitrary paths, and unsafe assets are rejected by the pack validator before activation.</p></div></section></div>
 }
 
 function SettingsView({ settings, onUpdate }: { settings: Settings; onUpdate: (patch: Partial<Settings>) => void }) {
-  return <div className="single-column"><section className="panel detail-panel settings-panel"><PanelHeader title="SYSTEM SETTINGS" tag="LOCAL ONLY" /><div className="settings-form"><div className="setting-section"><span className="classification">TRIGGER</span><h2>How should we overreact?</h2><label><span>GLOBAL HOTKEY LABEL</span><input value={settings.triggerLabel} onChange={(event) => onUpdate({ triggerLabel: event.target.value.toUpperCase() })} /><small>Native Tauri builds register Ctrl + Shift + P by default. USB buttons that emit this key are supported.</small></label></div><div className="setting-section"><span className="classification">THEATRICS</span><h2>Control the spectacle</h2><label className="range-label"><span>DEFAULT INCIDENT LENGTH <b>{settings.durationSeconds}s</b></span><input type="range" min="15" max="300" step="5" value={settings.durationSeconds} onChange={(event) => onUpdate({ durationSeconds: Number(event.target.value) })} /></label><Toggle label="Alert sounds" checked={settings.soundEnabled} onChange={(checked) => onUpdate({ soundEnabled: checked })} /><Toggle label="Reduced motion" checked={settings.reducedMotion} onChange={(checked) => onUpdate({ reducedMotion: checked })} /><Toggle label="Always on top" checked={settings.alwaysOnTop} onChange={(checked) => onUpdate({ alwaysOnTop: checked })} /></div></div></section></div>
+  return <div className="single-column"><section className="panel detail-panel settings-panel"><PanelHeader title="SYSTEM SETTINGS" tag="LOCAL ONLY" /><div className="settings-form"><div className="setting-section"><span className="classification">TRIGGER</span><h2>How should we overreact?</h2><label><span>GLOBAL HOTKEY LABEL</span><input value={settings.triggerLabel} onChange={(event) => onUpdate({ triggerLabel: event.target.value.toUpperCase() })} /><small>Native Tauri builds register Ctrl + Shift + P by default. USB buttons that emit this key are supported.</small></label><label className="range-label"><span>POST-INCIDENT COOLDOWN <b>{settings.cooldownSeconds}s</b></span><input type="range" min="0" max="30" step="1" value={settings.cooldownSeconds} onChange={(event) => onUpdate({ cooldownSeconds: Number(event.target.value) })} /></label></div><div className="setting-section"><span className="classification">THEATRICS</span><h2>Control the spectacle</h2><label className="range-label"><span>DEFAULT INCIDENT LENGTH <b>{settings.durationSeconds}s</b></span><input type="range" min="15" max="300" step="5" value={settings.durationSeconds} onChange={(event) => onUpdate({ durationSeconds: Number(event.target.value) })} /></label><Toggle label="Alert sounds" checked={settings.soundEnabled} onChange={(checked) => onUpdate({ soundEnabled: checked })} /><Toggle label="Reduced motion" checked={settings.reducedMotion} onChange={(checked) => onUpdate({ reducedMotion: checked })} /><Toggle label="Always on top" checked={settings.alwaysOnTop} onChange={(checked) => onUpdate({ alwaysOnTop: checked })} /></div></div></section></div>
 }
 
 function Toggle({ label, checked, onChange }: { label: string; checked: boolean; onChange: (value: boolean) => void }) { return <button className={`toggle-row ${checked ? 'checked' : ''}`} onClick={() => onChange(!checked)}><span>{label}</span><span className="toggle"><i /></span></button> }

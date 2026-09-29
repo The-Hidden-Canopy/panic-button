@@ -20,12 +20,15 @@ The repository contains a working engineering build:
 - Situation reports, resource allocation, timeline, and replay state.
 - Scenario editor with validation, JSON preview, draft persistence, import, export, and preview activation.
 - Strict data-only scenario-pack validation with unsafe-field, path, asset, duration, and reference checks.
+- Versioned, checksummed local storage with backup fallback and interrupted-run recovery.
+- Hotkey debounce plus configurable post-incident cooldown.
+- Scenario-pack byte limits, duplicate-id checks, safe path checks, and SHA-256 manifest validation.
 - Local replay persistence and replay JSON export.
 - Local settings for sound, reduced motion, display behavior, and duration.
 - Ten built-in scenarios covering mundane household, office, delivery, and device incidents.
 - Automated Vitest coverage for the incident engine and pack validator.
 
-The current persistence boundary is browser/Tauri local storage so the same build works in offline browser preview and the desktop shell. SQLite history, signed update manifests, multi-monitor mirroring, and installer packaging remain release-hardening work rather than hidden claims of completion.
+The current persistence boundary is versioned browser/Tauri local storage with checksums, backup fallback, and crash recovery markers so the same build works in offline browser preview and the desktop shell. SQLite history, signed update manifests, multi-monitor mirroring, and code signing remain later release-hardening work.
 
 This is deliberately theatrical: it does not lock the computer, disable Windows controls, execute scenario code, or make network requests at runtime.
 
@@ -53,7 +56,11 @@ The native shell registers `CommandOrControl+Shift+P` through Tauri's global sho
 npm run build
 cargo check --manifest-path src-tauri/Cargo.toml
 npm test
+npm audit --audit-level=high
+npm run tauri:build
 ```
+
+`npm run tauri:build` produces a Windows executable and an NSIS current-user installer under `src-tauri/target/release/bundle/`.
 
 ## Project map
 
@@ -63,6 +70,8 @@ src/
   data/scenarios.ts       built-in scenario pack
   lib/incidentEngine.ts   incident state and timeline helpers
   lib/native.ts           Tauri/browser trigger boundary
+  lib/storage.ts          versioned settings, drafts, replays, recovery markers
+  lib/triggerGuard.ts     debounce and post-incident cooldown gate
   styles.css              retro disaster-broadcast visual system
 src-tauri/
   src/lib.rs              native shell and global shortcut registration

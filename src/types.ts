@@ -93,7 +93,7 @@ export type ActiveIncident = {
   phaseIndex: number
   events: TimelineEvent[]
   resolved: boolean
-  exitReason?: 'AUTO_DISMISSED' | 'EMERGENCY_EXIT' | 'RESOLVED'
+  exitReason?: 'AUTO_DISMISSED' | 'EMERGENCY_EXIT' | 'RESOLVED' | 'ERROR'
   endedAt?: number
 }
 
@@ -109,4 +109,5 @@ export type Settings = {
   reducedMotion: boolean
   alwaysOnTop: boolean
   autoStart: boolean
+  cooldownSeconds: number
 }
