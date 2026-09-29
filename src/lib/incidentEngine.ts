@@ -30,4 +30,18 @@ export const getPhaseIndex = (scenario: Scenario, elapsedSeconds: number) => {
   return scenario.phases.length - 1
 }
 
+export const scaleScenarioDuration = (scenario: Scenario, durationSeconds: number): Scenario => {
+  const safeDuration = Math.max(15, Math.min(300, Math.round(durationSeconds)))
+  const originalTotal = scenario.phases.reduce((sum, phase) => sum + phase.durationSeconds, 0)
+  if (originalTotal === safeDuration) return scenario
+  let allocated = 0
+  const phases = scenario.phases.map((phase, index) => {
+    const isLast = index === scenario.phases.length - 1
+    const scaled = isLast ? safeDuration - allocated : Math.max(1, Math.round((phase.durationSeconds / originalTotal) * safeDuration))
+    allocated += scaled
+    return { ...phase, durationSeconds: scaled }
+  })
+  return { ...scenario, durationSeconds: safeDuration, phases }
+}
+
 export const phaseStart = (scenario: Scenario, phaseIndex: number) => scenario.phases.slice(0, phaseIndex).reduce((sum, phase) => sum + phase.durationSeconds, 0)

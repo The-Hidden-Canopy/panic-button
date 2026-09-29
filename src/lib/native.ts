@@ -15,3 +15,15 @@ export const registerGlobalTrigger = async (onTrigger: () => void): Promise<(() 
     return null
   }
 }
+
+export const setTheaterMode = async (enabled: boolean, alwaysOnTop: boolean): Promise<void> => {
+  if (typeof window === 'undefined' || !window.__TAURI_INTERNALS__) return
+  try {
+    const { getCurrentWindow } = await import('@tauri-apps/api/window')
+    const appWindow = getCurrentWindow()
+    await appWindow.setFullscreen(enabled)
+    await appWindow.setAlwaysOnTop(enabled && alwaysOnTop)
+  } catch {
+    // Browser preview and restricted desktop shells remain in a normal window.
+  }
+}

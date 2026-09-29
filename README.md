@@ -8,7 +8,7 @@ Panic Button is a local-first Windows desktop party app for turning mundane inco
 
 ## Current build
 
-The repository contains the first working vertical slice:
+The repository contains a working engineering build:
 
 - React + TypeScript command-center UI.
 - Tauri 2 native desktop shell.
@@ -18,9 +18,14 @@ The repository contains the first working vertical slice:
 - Automatic incident progression and stabilization.
 - Synthetic map and simulated satellite imagery labels.
 - Situation reports, resource allocation, timeline, and replay state.
-- Local scenario editor foundation with JSON preview and draft persistence.
+- Scenario editor with validation, JSON preview, draft persistence, import, export, and preview activation.
+- Strict data-only scenario-pack validation with unsafe-field, path, asset, duration, and reference checks.
+- Local replay persistence and replay JSON export.
 - Local settings for sound, reduced motion, display behavior, and duration.
-- Two built-in scenarios, with the architecture ready for scenario packs.
+- Ten built-in scenarios covering mundane household, office, delivery, and device incidents.
+- Automated Vitest coverage for the incident engine and pack validator.
+
+The current persistence boundary is browser/Tauri local storage so the same build works in offline browser preview and the desktop shell. SQLite history, signed update manifests, multi-monitor mirroring, and installer packaging remain release-hardening work rather than hidden claims of completion.
 
 This is deliberately theatrical: it does not lock the computer, disable Windows controls, execute scenario code, or make network requests at runtime.
 
@@ -47,6 +52,7 @@ The native shell registers `CommandOrControl+Shift+P` through Tauri's global sho
 ```powershell
 npm run build
 cargo check --manifest-path src-tauri/Cargo.toml
+npm test
 ```
 
 ## Project map

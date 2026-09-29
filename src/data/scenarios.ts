@@ -1,5 +1,42 @@
 import type { Scenario } from '../types'
 
+const makeScenario = (config: Pick<Scenario, 'id' | 'title' | 'premise' | 'severity' | 'accents'>, subject: string, resolution: string): Scenario => ({
+  ...config,
+  durationSeconds: 60,
+  resolution,
+  phases: [
+    { id: 'p1', label: 'INITIAL ASSESSMENT', durationSeconds: 20, objective: `Confirm the ${subject} has genuinely become a situation.`, alerts: ['MINOR ISSUE CONFIRMED', 'OBSERVATION PROTOCOL ACTIVE'], reportIds: ['r1'] },
+    { id: 'p2', label: 'RESOURCE SURGE', durationSeconds: 20, objective: `Deploy unnecessary resources toward the ${subject}.`, alerts: ['ESCALATION AUTHORIZED', 'MORALE REMAINS FRAGILE'], reportIds: ['r2'] },
+    { id: 'p3', label: 'STABILIZATION', durationSeconds: 20, objective: `Restore normal operations around the ${subject}.`, alerts: ['RESOLUTION SIGNAL ACQUIRED', 'CIVILIAN CONFIDENCE RETURNING'], reportIds: ['r3'] },
+  ],
+  resources: [
+    { id: 'r1', label: 'Incident Analysts', value: 2, unit: 'PERSONNEL', icon: '◉', color: config.accents[0] },
+    { id: 'r2', label: 'Contingency Snacks', value: 7, unit: 'UNITS', icon: '✦', color: config.accents[1] },
+    { id: 'r3', label: 'Public Confidence', value: 68, unit: '%', icon: '↗', color: '#73f7b1' },
+  ],
+  reports: [
+    { id: 'r1', classification: 'ROUTINE / URGENT', heading: 'SITUATION CONFIRMED', body: `The ${subject} is behaving in a manner inconsistent with a calm household.`, recommendation: 'Maintain an authoritative posture while gathering more information.', confidence: 78 },
+    { id: 'r2', classification: 'EYES ONLY', heading: 'RESOURCES DEPLOYED', body: `Additional personnel have been briefed on the ${subject} and are pretending to have expertise.`, recommendation: 'Do not make any irreversible decisions.', confidence: 61 },
+    { id: 'r3', classification: 'FLASH', heading: 'BASELINE RESTORED', body: `The ${subject} is no longer escalating. Analysts recommend acting as though this was all intentional.`, recommendation: 'Issue a measured statement and stand down theatrics.', confidence: 93 },
+  ],
+  markers: [
+    { id: 'command', label: 'COMMAND POST', x: 52, y: 53, tone: 'alert' },
+    { id: 'unit', label: 'RESPONSE UNIT', x: 27, y: 30, tone: 'unit' },
+    { id: 'unknown', label: 'UNKNOWN FACTOR', x: 77, y: 69, tone: 'neutral' },
+  ],
+})
+
+const additionalScenarios: Scenario[] = [
+  makeScenario({ id: 'left-sock-missing', title: 'LEFT SOCK MISSING', premise: 'One member of a previously stable textile pair has disappeared.', severity: 'ELEVATED', accents: ['#59d8ff', '#a687ff'] }, 'textile anomaly', 'The sock was found inside a pillowcase. The household has learned nothing.'),
+  makeScenario({ id: 'streaming-buffering', title: 'STREAMING SERVICE BUFFERING', premise: 'The entertainment stream has paused at a narratively significant moment.', severity: 'CRITICAL', accents: ['#ff3d5a', '#59d8ff'] }, 'buffering event', 'Playback resumed. The plot can never be trusted again.'),
+  makeScenario({ id: 'dog-wall-suspicion', title: 'DOG LOOKING AT WALL', premise: 'A trusted canine asset is monitoring an apparently empty section of wall.', severity: 'CATASTROPHIC', accents: ['#c084fc', '#73f7b1'] }, 'wall observation', 'The dog has moved on. The wall remains a person of interest.'),
+  makeScenario({ id: 'printer-warning', title: 'PRINTER WARNING', premise: 'The printer has displayed a warning containing no actionable information.', severity: 'CRITICAL', accents: ['#ffb347', '#ff3d5a'] }, 'printer warning', 'The printer printed a page that says nothing. This is considered progress.'),
+  makeScenario({ id: 'grocery-shortfall', title: 'GROCERY BAG SHORTFALL', premise: 'The household inventory contains one fewer item than the receipt suggests.', severity: 'ELEVATED', accents: ['#73f7b1', '#ffb347'] }, 'inventory discrepancy', 'The missing item was in the car. Auditors remain unconvinced.'),
+  makeScenario({ id: 'phone-battery-19', title: 'PHONE BATTERY AT 19%', premise: 'The primary communications device has entered a mathematically alarming state.', severity: 'CRITICAL', accents: ['#ff3d5a', '#73f7b1'] }, 'battery event', 'A charger was located. The device has been instructed to recover.'),
+  makeScenario({ id: 'package-wrong-door', title: 'PACKAGE WRONG DOOR', premise: 'A parcel has arrived at the wrong door, possibly on purpose.', severity: 'ELEVATED', accents: ['#59d8ff', '#ffb347'] }, 'package migration', 'The parcel reached its intended destination after a short diplomatic exchange.'),
+  makeScenario({ id: 'meeting-could-email', title: 'MEETING COULD BE AN EMAIL', premise: 'A calendar invitation has achieved a level of unnecessary complexity.', severity: 'CATASTROPHIC', accents: ['#a687ff', '#ff3d5a'] }, 'calendar incident', 'The meeting ended. An email was sent anyway.'),
+]
+
 export const scenarios: Scenario[] = [
   {
     id: 'pizza-14-minutes-late',
@@ -61,4 +98,5 @@ export const scenarios: Scenario[] = [
       { id: 'mug', label: 'MUG STAGING', x: 25, y: 28, tone: 'unit' },
     ],
   },
+  ...additionalScenarios,
 ]

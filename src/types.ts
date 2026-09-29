@@ -49,6 +49,35 @@ export type Scenario = {
   accents: [string, string]
 }
 
+export type AssetManifest = {
+  id: string
+  kind: 'image' | 'audio' | 'font'
+  path: string
+  bytes: number
+  sha256?: string
+}
+
+export type PackSignature = {
+  algorithm: 'sha256'
+  value: string
+}
+
+export type ScenarioPack = {
+  id: string
+  name: string
+  version: string
+  author: string
+  scenarios: Scenario[]
+  assets: AssetManifest[]
+  signature?: PackSignature
+}
+
+export type ValidationIssue = {
+  path: string
+  message: string
+  severity: 'error' | 'warning'
+}
+
 export type TimelineEvent = {
   id: string
   time: string
@@ -66,6 +95,11 @@ export type ActiveIncident = {
   resolved: boolean
   exitReason?: 'AUTO_DISMISSED' | 'EMERGENCY_EXIT' | 'RESOLVED'
   endedAt?: number
+}
+
+export type ReplayRecord = ActiveIncident & {
+  id: string
+  savedAt: number
 }
 
 export type Settings = {

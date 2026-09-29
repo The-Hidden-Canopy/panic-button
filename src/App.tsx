@@ -1,8 +1,10 @@
 import { useEffect, useRef, useState, type CSSProperties } from 'react'
 import { scenarios as builtInScenarios } from './data/scenarios'
-import { createIncident, formatDuration, getPhaseIndex, makeEvent } from './lib/incidentEngine'
-import { registerGlobalTrigger } from './lib/native'
-import type { ActiveIncident, Scenario, Settings } from './types'
+import { createIncident, formatDuration, getPhaseIndex, makeEvent, scaleScenarioDuration } from './lib/incidentEngine'
+import { packFromScenarios, parseScenarioPack, validateScenario } from './lib/packValidator'
+import { registerGlobalTrigger, setTheaterMode } from './lib/native'
+import { downloadJson, loadReplays, loadScenarioDrafts, loadSettings, saveReplay, saveScenarioDraft, saveSettings } from './lib/storage'
+import type { ActiveIncident, ReplayRecord, Scenario, Settings, ValidationIssue } from './types'
 
 type View = 'command' | 'timeline' | 'reports' | 'editor' | 'settings'
 
@@ -15,14 +17,7 @@ const defaultSettings: Settings = {
   autoStart: false,
 }
 
-const readSettings = (): Settings => {
-  try {
-    const stored = localStorage.getItem('panic-button-settings')
-    return stored ? { ...defaultSettings, ...JSON.parse(stored) } : defaultSettings
-  } catch {
-    return defaultSettings
-  }
-}
+const readSettings = (): Settings => loadSettings(defaultSettings)
 
 const playAlert = (enabled: boolean) => {
   if (!enabled || typeof window === 'undefined') return
@@ -48,26 +43,39 @@ const playAlert = (enabled: boolean) => {
 
 const pickScenario = (items: Scenario[]) => items[Math.floor(Math.random() * items.length)] ?? items[0]
 
+const replayRecord = (incident: ActiveIncident): ReplayRecord => ({ ...incident, id: `run-${incident.startedAt}`, savedAt: Date.now() })
+
 function App() {
   const [settings, setSettings] = useState<Settings>(readSettings)
-  const [scenarios, setScenarios] = useState<Scenario[]>(builtInScenarios)
+  const [scenarios, setScenarios] = useState<Scenario[]>(() => {
+    const drafts = new Map(loadScenarioDrafts().map((scenario) => [scenario.id, scenario]))
+    const mergedBuiltIns = builtInScenarios.map((scenario) => drafts.get(scenario.id) ?? scenario)
+    const custom = loadScenarioDrafts().filter((scenario) => !builtInScenarios.some((builtIn) => builtIn.id === scenario.id))
+    return [...mergedBuiltIns, ...custom]
+  })
   const [incident, setIncident] = useState<ActiveIncident | null>(null)
   const [view, setView] = useState<View>('command')
   const [selectedScenarioId, setSelectedScenarioId] = useState(builtInScenarios[0].id)
   const [notice, setNotice] = useState('SYSTEM NOMINAL // AWAITING MUNDANE CRISIS')
-  const [lastReplay, setLastReplay] = useState<ActiveIncident | null>(null)
+  const [lastReplay, setLastReplay] = useState<ActiveIncident | null>(() => loadReplays()[0] ?? null)
+  const [packIssues, setPackIssues] = useState<ValidationIssue[]>([])
   const editorScenario = scenarios.find((scenario) => scenario.id === selectedScenarioId) ?? scenarios[0]
   const triggerRef = useRef<() => void>(() => undefined)
   const incidentRef = useRef<ActiveIncident | null>(null)
   const exitRef = useRef<(reason: ActiveIncident['exitReason']) => void>(() => undefined)
 
-  const startIncident = () => {
-    const next = createIncident(pickScenario(scenarios))
+  const startSpecificIncident = (scenario: Scenario) => {
+    const next = createIncident(scaleScenarioDuration(scenario, settings.durationSeconds))
     setIncident(next)
     setLastReplay(null)
     setView('command')
     setNotice('ALERT DISPATCHED // ALL AVAILABLE RESOURCES ALLOCATED')
     playAlert(settings.soundEnabled)
+    void setTheaterMode(true, settings.alwaysOnTop)
+  }
+
+  const startIncident = () => {
+    startSpecificIncident(pickScenario(scenarios))
   }
 
   const exitIncident = (reason: ActiveIncident['exitReason']) => {
@@ -75,6 +83,8 @@ function App() {
       if (!current) return current
       const completed = { ...current, resolved: true, exitReason: reason, endedAt: Date.now() }
       setLastReplay(completed)
+      saveReplay(replayRecord(completed))
+      void setTheaterMode(false, false)
       setNotice(reason === 'EMERGENCY_EXIT' ? 'EMERGENCY EXIT // THE SITUATION HAS BEEN CONTAINED' : 'INCIDENT CLOSED // NO FURTHER ACTION REQUIRED')
       return completed
     })
@@ -125,6 +135,8 @@ function App() {
         if (elapsedSeconds >= current.scenario.durationSeconds) {
           const completed = { ...current, elapsedSeconds, phaseIndex, events, resolved: true, exitReason: 'AUTO_DISMISSED' as const }
           setLastReplay(completed)
+          saveReplay(replayRecord(completed))
+          void setTheaterMode(false, false)
           setNotice('AUTO-DISPATCH COMPLETE // PIZZA-CLASS THREAT RETURNED TO BASELINE')
           return completed
         }
@@ -135,7 +147,7 @@ function App() {
   }, [incident?.resolved, incident?.startedAt, settings.soundEnabled])
 
   useEffect(() => {
-    localStorage.setItem('panic-button-settings', JSON.stringify(settings))
+    saveSettings(settings)
   }, [settings])
 
   const updateSettings = (patch: Partial<Settings>) => setSettings((current) => ({ ...current, ...patch }))
@@ -147,7 +159,34 @@ function App() {
   const incidentLabel = incident && !incident.resolved ? 'LIVE INCIDENT' : incident?.resolved ? 'INCIDENT SUMMARY' : 'STANDBY MODE'
 
   const updateEditorScenario = (patch: Partial<Scenario>) => {
-    setScenarios((current) => current.map((scenario) => scenario.id === editorScenario.id ? { ...scenario, ...patch } : scenario))
+    setScenarios((current) => current.map((scenario) => {
+      if (scenario.id !== editorScenario.id) return scenario
+      return patch.durationSeconds ? scaleScenarioDuration({ ...scenario, ...patch }, patch.durationSeconds) : { ...scenario, ...patch }
+    }))
+  }
+
+  const saveEditorScenario = (scenario: Scenario) => {
+    const issues = validateScenario(scenario)
+    setPackIssues(issues)
+    if (issues.some((item) => item.severity === 'error')) return false
+    saveScenarioDraft(scenario)
+    setNotice(`SCENARIO DRAFT SAVED // ${scenario.title}`)
+    return true
+  }
+
+  const importPack = async (file: File) => {
+    const result = parseScenarioPack(await file.text())
+    setPackIssues(result.issues)
+    if (!result.pack) {
+      setNotice('PACK REJECTED // VALIDATION FAILED')
+      return
+    }
+    setScenarios((current) => {
+      const incoming = new Map(result.pack!.scenarios.map((scenario) => [scenario.id, scenario]))
+      return [...current.filter((scenario) => !incoming.has(scenario.id)), ...result.pack!.scenarios]
+    })
+    setSelectedScenarioId(result.pack.scenarios[0].id)
+    setNotice(`PACK IMPORTED // ${result.pack.name.toUpperCase()}`)
   }
 
   const navItems: { id: View; label: string; icon: string }[] = [
@@ -202,9 +241,12 @@ function App() {
         <div className="status-strip"><span className="status-pulse" /> {notice}<span className="strip-right">{new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })} EST</span></div>
 
         {view === 'command' && <CommandView incident={incident} scenario={activeScenario} phase={phase} remaining={remaining} progress={progress} elapsed={elapsed} onStart={startIncident} onExit={() => exitIncident('RESOLVED')} />}
-        {view === 'timeline' && <TimelineView incident={incident ?? lastReplay} onStart={startIncident} />}
+        {view === 'timeline' && <TimelineView incident={incident ?? lastReplay} onStart={startIncident} onExport={(replay) => {
+          const record = replayRecord(replay)
+          downloadJson(`${replay.scenario.id}-${record.id}.json`, record)
+        }} />}
         {view === 'reports' && <ReportsView incident={incident ?? lastReplay} scenario={activeScenario} />}
-        {view === 'editor' && <EditorView scenario={editorScenario} scenarios={scenarios} selectedId={selectedScenarioId} onSelect={setSelectedScenarioId} onUpdate={updateEditorScenario} onPreview={() => { setIncident(createIncident(editorScenario)); setView('command') }} />}
+        {view === 'editor' && <EditorView scenario={editorScenario} scenarios={scenarios} selectedId={selectedScenarioId} issues={packIssues} onSelect={setSelectedScenarioId} onUpdate={updateEditorScenario} onSave={() => saveEditorScenario(editorScenario)} onImport={importPack} onExport={() => downloadJson(`${editorScenario.id}-pack.json`, packFromScenarios([editorScenario], 'Local Scenario Export'))} onPreview={() => startSpecificIncident(editorScenario)} />}
         {view === 'settings' && <SettingsView settings={settings} onUpdate={updateSettings} />}
       </main>
     </div>
@@ -238,19 +280,20 @@ const isLiveNumber = (incident: ActiveIncident | null) => Boolean(incident && !i
 
 function PanelHeader({ title, tag }: { title: string; tag: string }) { return <div className="panel-header"><span>{title}</span><b>{tag}</b></div> }
 
-function TimelineView({ incident, onStart }: { incident: ActiveIncident | null; onStart: () => void }) {
-  return <div className="single-column"><section className="panel detail-panel"><PanelHeader title="INCIDENT TIMELINE" tag={incident ? 'RECORDED' : 'NO ACTIVE CASE'} /><div className="detail-intro"><span className="classification">CHRONOLOGICAL EVENT LOG</span><h2>{incident ? incident.scenario.title : 'No incident currently deployed'}</h2><p>{incident ? incident.scenario.premise : 'The command center is waiting for a minor inconvenience worthy of escalation.'}</p></div>{incident ? <div className="timeline-list">{incident.events.map((event) => <div className="timeline-event" key={event.id}><span className={`timeline-dot ${event.tone}`} /><span className="timeline-time">{event.time}</span><div><strong>{event.label}</strong><p>{event.detail}</p></div></div>)}</div> : <button className="primary-button" onClick={onStart}>TRIGGER RANDOM INCIDENT <span>→</span></button>}</section></div>
+function TimelineView({ incident, onStart, onExport }: { incident: ActiveIncident | null; onStart: () => void; onExport: (incident: ActiveIncident) => void }) {
+  return <div className="single-column"><section className="panel detail-panel"><PanelHeader title="INCIDENT TIMELINE" tag={incident ? 'RECORDED' : 'NO ACTIVE CASE'} /><div className="detail-intro"><span className="classification">CHRONOLOGICAL EVENT LOG</span><h2>{incident ? incident.scenario.title : 'No incident currently deployed'}</h2><p>{incident ? incident.scenario.premise : 'The command center is waiting for a minor inconvenience worthy of escalation.'}</p></div>{incident ? <><div className="detail-actions"><button className="secondary-button" onClick={() => onExport(incident)}>EXPORT REPLAY JSON</button></div><div className="timeline-list">{incident.events.map((event) => <div className="timeline-event" key={event.id}><span className={`timeline-dot ${event.tone}`} /><span className="timeline-time">{event.time}</span><div><strong>{event.label}</strong><p>{event.detail}</p></div></div>)}</div></> : <button className="primary-button" onClick={onStart}>TRIGGER RANDOM INCIDENT <span>→</span></button>}</section></div>
 }
 
 function ReportsView({ incident, scenario }: { incident: ActiveIncident | null; scenario: Scenario }) {
   return <div className="single-column"><section className="panel detail-panel"><PanelHeader title="SITUATION REPORTS" tag="EYES ONLY" /><div className="report-grid">{scenario.reports.map((report, index) => <article className={`report-card ${incident?.phaseIndex === index ? 'selected' : ''}`} key={report.id}><div className="report-card-top"><span>{report.classification}</span><b>REPORT {String(index + 1).padStart(2, '0')}</b></div><h3>{report.heading}</h3><p>{report.body}</p><div className="report-card-footer"><span>RECOMMENDATION</span><strong>{report.recommendation}</strong><em>{report.confidence}% CONFIDENCE</em></div></article>)}</div></section></div>
 }
 
-function EditorView({ scenario, scenarios, selectedId, onSelect, onUpdate, onPreview }: { scenario: Scenario; scenarios: Scenario[]; selectedId: string; onSelect: (id: string) => void; onUpdate: (patch: Partial<Scenario>) => void; onPreview: () => void }) {
+function EditorView({ scenario, scenarios, selectedId, issues, onSelect, onUpdate, onSave, onImport, onExport, onPreview }: { scenario: Scenario; scenarios: Scenario[]; selectedId: string; issues: ValidationIssue[]; onSelect: (id: string) => void; onUpdate: (patch: Partial<Scenario>) => void; onSave: () => boolean; onImport: (file: File) => void; onExport: () => void; onPreview: () => void }) {
   const [saved, setSaved] = useState(false)
   const [jsonOpen, setJsonOpen] = useState(false)
-  const save = () => { localStorage.setItem(`panic-scenario-${scenario.id}`, JSON.stringify(scenario)); setSaved(true); window.setTimeout(() => setSaved(false), 1600) }
-  return <div className="single-column"><section className="panel editor-panel"><PanelHeader title="SCENARIO LAB" tag="LOCAL AUTHORING" /><div className="editor-toolbar"><div><span className="tiny-label">SCENARIO PACK</span><select value={selectedId} onChange={(event) => onSelect(event.target.value)}>{scenarios.map((item) => <option value={item.id} key={item.id}>{item.title}</option>)}</select></div><div className="editor-actions"><button className="secondary-button" onClick={() => setJsonOpen(!jsonOpen)}>{jsonOpen ? 'HIDE JSON' : 'VIEW JSON'}</button><button className="secondary-button" onClick={onPreview}>PREVIEW INCIDENT</button><button className="primary-button small" onClick={save}>{saved ? 'SAVED ✓' : 'SAVE DRAFT'}</button></div></div><div className="editor-grid"><label><span>TITLE</span><input value={scenario.title} onChange={(event) => onUpdate({ title: event.target.value.toUpperCase() })} /></label><label><span>SEVERITY</span><select value={scenario.severity} onChange={(event) => onUpdate({ severity: event.target.value as Scenario['severity'] })}><option>LOW</option><option>ELEVATED</option><option>CRITICAL</option><option>CATASTROPHIC</option></select></label><label className="wide"><span>PREMISE</span><textarea value={scenario.premise} onChange={(event) => onUpdate({ premise: event.target.value })} rows={3} /></label><label><span>DURATION (SECONDS)</span><input type="number" min="15" max="300" value={scenario.durationSeconds} onChange={(event) => onUpdate({ durationSeconds: Math.max(15, Math.min(300, Number(event.target.value))) })} /></label><label><span>RESOLUTION</span><input value={scenario.resolution} onChange={(event) => onUpdate({ resolution: event.target.value })} /></label></div>{jsonOpen && <pre className="json-preview">{JSON.stringify(scenario, null, 2)}</pre>}<div className="editor-note"><span>ⓘ</span><p>Scenario packs are local JSON. Executable code, external URLs, arbitrary paths, and unsafe assets are rejected by the pack validator.</p></div></section></div>
+  const fileInput = useRef<HTMLInputElement>(null)
+  const save = () => { if (onSave()) { setSaved(true); window.setTimeout(() => setSaved(false), 1600) } }
+  return <div className="single-column"><section className="panel editor-panel"><PanelHeader title="SCENARIO LAB" tag="LOCAL AUTHORING" /><div className="editor-toolbar"><div><span className="tiny-label">SCENARIO PACK</span><select value={selectedId} onChange={(event) => onSelect(event.target.value)}>{scenarios.map((item) => <option value={item.id} key={item.id}>{item.title}</option>)}</select></div><div className="editor-actions"><input ref={fileInput} type="file" accept="application/json,.json" hidden onChange={(event) => { const file = event.target.files?.[0]; if (file) onImport(file); event.target.value = '' }} /><button className="secondary-button" onClick={() => fileInput.current?.click()}>IMPORT PACK</button><button className="secondary-button" onClick={onExport}>EXPORT PACK</button><button className="secondary-button" onClick={() => setJsonOpen(!jsonOpen)}>{jsonOpen ? 'HIDE JSON' : 'VIEW JSON'}</button><button className="secondary-button" onClick={onPreview}>PREVIEW INCIDENT</button><button className="primary-button small" onClick={save}>{saved ? 'SAVED ✓' : 'SAVE DRAFT'}</button></div></div><div className="editor-grid"><label><span>TITLE</span><input value={scenario.title} onChange={(event) => onUpdate({ title: event.target.value.toUpperCase() })} /></label><label><span>SEVERITY</span><select value={scenario.severity} onChange={(event) => onUpdate({ severity: event.target.value as Scenario['severity'] })}><option>LOW</option><option>ELEVATED</option><option>CRITICAL</option><option>CATASTROPHIC</option></select></label><label className="wide"><span>PREMISE</span><textarea value={scenario.premise} onChange={(event) => onUpdate({ premise: event.target.value })} rows={3} /></label><label><span>DURATION (SECONDS)</span><input type="number" min="15" max="300" value={scenario.durationSeconds} onChange={(event) => onUpdate({ durationSeconds: Math.max(15, Math.min(300, Number(event.target.value))) })} /></label><label><span>RESOLUTION</span><input value={scenario.resolution} onChange={(event) => onUpdate({ resolution: event.target.value })} /></label></div>{issues.length > 0 && <div className="validation-box"><strong>PACK VALIDATION</strong>{issues.map((item) => <div className={item.severity} key={`${item.path}-${item.message}`}>{item.path}: {item.message}</div>)}</div>}{jsonOpen && <pre className="json-preview">{JSON.stringify(scenario, null, 2)}</pre>}<div className="editor-note"><span>ⓘ</span><p>Scenario packs are local JSON. Executable code, external URLs, arbitrary paths, and unsafe assets are rejected by the pack validator before activation.</p></div></section></div>
 }
 
 function SettingsView({ settings, onUpdate }: { settings: Settings; onUpdate: (patch: Partial<Settings>) => void }) {

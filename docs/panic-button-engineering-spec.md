@@ -13,7 +13,9 @@ Panic Button is a standalone Windows desktop party app, not a host plugin. Its e
 - Safe `Esc` emergency exit from every runtime state.
 - Default `Ctrl + Shift + P` global trigger.
 - Generic HID support through keyboard-emulation buttons.
-- Built-in scenario pack plus local scenario editor foundation.
+- Ten built-in scenarios plus a form-driven local scenario editor.
+- Validated JSON scenario-pack import/export with data-only safety boundaries.
+- Local replay persistence and replay JSON export.
 - Synthetic maps, fake satellite layers, situation reports, resources, timelines, and alert audio.
 - No accounts, telemetry, cloud dependency, arbitrary commands, or runtime network assets.
 
@@ -46,7 +48,7 @@ The initial duration is 90 seconds and is configurable between 15 and 300 second
 
 ## Scenario contract
 
-Scenarios are data-only. A future pack validator must reject executable code, shell commands, external URLs, arbitrary filesystem paths, oversized assets, invalid durations, and missing resolution content.
+Scenarios are data-only. The pack validator rejects executable code, shell commands, external URLs, unsafe filesystem paths, oversized assets, invalid durations, missing resolution content, broken report references, and out-of-range map markers before activation.
 
 ```ts
 type ScenarioPack = {
@@ -126,7 +128,7 @@ runtime-error
 
 ## Storage and update boundary
 
-The target persistence model is versioned settings JSON, local scenario packs, and SQLite incident/replay history. Writes must be atomic. Runtime remains offline. Optional future pack updates require signed manifests, SHA-256 asset hashes, compatibility checks, explicit user approval, and rollback.
+The current browser-compatible persistence model is versioned local settings, local scenario drafts, and replay records. Runtime remains offline. SQLite incident/replay history, signed manifests, SHA-256 asset hashes, compatibility checks, explicit update approval, and rollback remain release-hardening work for the native distribution.
 
 ## Safety requirements
 
@@ -144,15 +146,17 @@ The target persistence model is versioned settings JSON, local scenario packs, a
 - The dashboard appears without changing the rest of Windows.
 - Built-in scenarios run offline and progress through multiple phases.
 - Auto-dismiss and emergency exit work from every state.
-- The editor can modify, preview, and save a scenario draft.
+- The editor can modify, validate, preview, save, import, and export a scenario draft.
+- Ten built-in scenarios run offline and each has multiple timed phases, map markers, resources, reports, and a resolution.
+- Replay records can be persisted locally and exported as JSON.
 - The browser preview and Tauri shell share the same incident behavior.
-- `npm run build` and `cargo check --manifest-path src-tauri/Cargo.toml` pass.
-- Future malformed or unsafe scenario packs are rejected before activation.
+- `npm test`, `npm run build`, and `cargo check --manifest-path src-tauri/Cargo.toml` pass.
+- Malformed or unsafe scenario packs are rejected before activation.
 
 ## Future slices
 
-1. Add SQLite-backed run history and replay export.
+1. Add SQLite-backed run history for the packaged native build.
 2. Add multi-monitor surveillance windows.
-3. Add signed scenario-pack import/update flow.
-4. Add more built-in scenarios and local audio assets.
+3. Add signed scenario-pack update manifests and rollback.
+4. Add bundled local audio assets and captioned radio chatter.
 5. Add Windows installer packaging after a verified icon/resource pipeline.
