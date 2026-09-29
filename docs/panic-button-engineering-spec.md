@@ -19,6 +19,9 @@ Panic Button is a standalone Windows desktop party app, not a host plugin. Its e
 - Versioned, checksummed local persistence with backup fallback and interrupted-run recovery markers.
 - Hotkey debounce and configurable post-incident cooldown.
 - Pack-size, duplicate-id, SHA-256 manifest, and unsafe-path checks.
+- Optional Ed25519 pack signature verification and minimum-app-version compatibility checks.
+- Native SQLite persistence with browser-compatible fallback.
+- Optional secondary-display surveillance mirrors labeled as simulated.
 - Synthetic maps, fake satellite layers, situation reports, resources, timelines, and alert audio.
 - No accounts, telemetry, cloud dependency, arbitrary commands, or runtime network assets.
 
@@ -131,7 +134,7 @@ runtime-error
 
 ## Storage and update boundary
 
-The current browser-compatible persistence model is versioned and checksummed local settings, local scenario drafts, replay records, and active-run recovery markers. Runtime remains offline. SQLite incident/replay history, signed manifests, compatibility checks, explicit update approval, and rollback remain release-hardening work for the native distribution.
+The current persistence model is versioned and checksummed local settings, local scenario drafts, replay records, and active-run recovery markers. Packaged Tauri builds mirror these values into SQLite using WAL mode; browser preview remains local-storage compatible. Signed packs are verified when signatures are present, while unsigned packs remain allowed for local authoring. Runtime remains offline.
 
 ## Safety requirements
 
@@ -155,14 +158,15 @@ The current browser-compatible persistence model is versioned and checksummed lo
 - Interrupted active runs are recovered as `ERROR` replays on the next launch.
 - Repeated trigger presses are debounced and incidents observe a configurable cooldown.
 - Windows packaging produces an NSIS current-user installer artifact.
+- Signed packs are verified with Ed25519 metadata and incompatible minimum-app versions are rejected.
+- Secondary displays can show a separate full-screen simulated surveillance mirror.
 - The browser preview and Tauri shell share the same incident behavior.
 - `npm test`, `npm run build`, `npm audit --audit-level=high`, `cargo check --manifest-path src-tauri/Cargo.toml`, and `npm run tauri:build` pass.
 - Malformed or unsafe scenario packs are rejected before activation.
 
 ## Future slices
 
-1. Add SQLite-backed run history for larger replay libraries.
-2. Add multi-monitor surveillance windows.
-3. Add signed scenario-pack update manifests and rollback.
-4. Add code signing and clean-machine Windows acceptance automation.
-5. Add bundled local audio assets and captioned radio chatter.
+1. Add signed update manifests, explicit approval, and rollback for remote pack distribution.
+2. Add code signing and clean-machine Windows acceptance automation.
+3. Add richer SQLite replay queries and retention controls.
+4. Add bundled local audio assets and captioned radio chatter.

@@ -1,3 +1,4 @@
+import { etc, verifyAsync } from '@noble/ed25519'
 import type { Scenario, ScenarioPack, ValidationIssue } from '../types'
 
 const MIN_DURATION = 15
@@ -7,6 +8,8 @@ const MAX_ASSETS = 200
 export const MAX_PACK_BYTES = 2_000_000
 const forbiddenKeys = new Set(['script', 'command', 'exec', 'shell', 'url', 'filesystem', 'runtime'])
 const externalUrlPattern = /(?:https?|ftp|file|javascript):\/\//i
+export const SCENARIO_PACK_SCHEMA_VERSION = 1
+const CURRENT_APP_VERSION = '0.2.0'
 
 const issue = (path: string, message: string, severity: ValidationIssue['severity'] = 'error'): ValidationIssue => ({ path, message, severity })
 
@@ -22,6 +25,19 @@ const scanForbiddenKeys = (value: unknown, path: string, issues: ValidationIssue
     scanForbiddenKeys(nested, `${path}.${key}`, issues)
   })
 }
+
+const canonicalize = (value: unknown): unknown => {
+  if (Array.isArray(value)) return value.map(canonicalize)
+  if (!value || typeof value !== 'object') return value
+  return Object.fromEntries(Object.entries(value as Record<string, unknown>).sort(([left], [right]) => left.localeCompare(right)).map(([key, nested]) => [key, canonicalize(nested)]))
+}
+
+export const canonicalPackPayload = (pack: ScenarioPack): string => {
+  const unsigned = { ...pack, signature: undefined }
+  return JSON.stringify(canonicalize(unsigned))
+}
+
+const hexDigest = (value: string, length: number) => new RegExp(`^[a-f0-9]{${length}}$`, 'i').test(value)
 
 export const validateScenario = (scenario: Scenario, path = 'scenario'): ValidationIssue[] => {
   const issues: ValidationIssue[] = []
@@ -70,6 +86,12 @@ export const validatePack = (pack: ScenarioPack): ValidationIssue[] => {
   if (typeof pack.name !== 'string' || !pack.name.trim()) issues.push(issue('pack.name', 'Pack name is required.'))
   if (typeof pack.version !== 'string' || !pack.version.trim()) issues.push(issue('pack.version', 'Pack version is required.'))
   if (typeof pack.author !== 'string' || !pack.author.trim()) issues.push(issue('pack.author', 'Pack author is required.'))
+  if (pack.schemaVersion !== undefined && pack.schemaVersion !== SCENARIO_PACK_SCHEMA_VERSION) issues.push(issue('pack.schemaVersion', `Unsupported pack schema version: ${pack.schemaVersion}.`))
+  if (pack.minAppVersion && typeof pack.minAppVersion === 'string') {
+    const requiredMajor = Number.parseInt(pack.minAppVersion.split('.')[0], 10)
+    const currentMajor = Number.parseInt(CURRENT_APP_VERSION.split('.')[0], 10)
+    if (Number.isFinite(requiredMajor) && requiredMajor > currentMajor) issues.push(issue('pack.minAppVersion', `Pack requires a newer application version than ${CURRENT_APP_VERSION}.`))
+  }
   if (!Array.isArray(pack.scenarios) || pack.scenarios.length < 1 || pack.scenarios.length > MAX_SCENARIOS) issues.push(issue('pack.scenarios', `Provide between 1 and ${MAX_SCENARIOS} scenarios.`))
   if (!Array.isArray(pack.assets) || pack.assets.length > MAX_ASSETS) issues.push(issue('pack.assets', `Provide no more than ${MAX_ASSETS} assets.`))
   const scenarios = Array.isArray(pack.scenarios) ? pack.scenarios : []
@@ -99,8 +121,38 @@ export const validatePack = (pack: ScenarioPack): ValidationIssue[] => {
     if (!Number.isInteger(asset.bytes) || asset.bytes < 0 || asset.bytes > 20_000_000) issues.push(issue(`pack.assets[${index}].bytes`, 'Asset must be no larger than 20 MB.'))
     if (asset.sha256 && !/^[a-f0-9]{64}$/i.test(asset.sha256)) issues.push(issue(`pack.assets[${index}].sha256`, 'Asset SHA-256 must be a 64-character hexadecimal digest.'))
   }
+  if (pack.signature) {
+    if (pack.signature.algorithm === 'ed25519') {
+      if (typeof pack.signature.publicKey !== 'string' || !hexDigest(pack.signature.publicKey, 64)) issues.push(issue('pack.signature.publicKey', 'Ed25519 public keys must be 32-byte hexadecimal values.'))
+      if (typeof pack.signature.value !== 'string' || !hexDigest(pack.signature.value, 128)) issues.push(issue('pack.signature.value', 'Ed25519 signatures must be 64-byte hexadecimal values.'))
+    } else if (pack.signature.algorithm === 'sha256') {
+      if (typeof pack.signature.value !== 'string' || !hexDigest(pack.signature.value, 64)) issues.push(issue('pack.signature.value', 'SHA-256 signatures must be 32-byte hexadecimal values.'))
+    } else {
+      issues.push(issue('pack.signature.algorithm', 'Unsupported pack signature algorithm.'))
+    }
+  }
   scanForbiddenKeys(pack, 'pack', issues)
   return issues
+}
+
+export const verifyPackSignature = async (pack: ScenarioPack): Promise<{ valid: boolean; unsigned: boolean; message?: string }> => {
+  if (!pack.signature) return { valid: true, unsigned: true }
+  try {
+    const message = new TextEncoder().encode(canonicalPackPayload(pack))
+    if (pack.signature.algorithm === 'sha256') {
+      if (!globalThis.crypto?.subtle) return { valid: false, unsigned: false, message: 'This runtime does not provide SHA-256 verification.' }
+      const digest = await globalThis.crypto.subtle.digest('SHA-256', message)
+      const actual = Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, '0')).join('')
+      return actual.toLowerCase() === pack.signature.value.toLowerCase() ? { valid: true, unsigned: false } : { valid: false, unsigned: false, message: 'Pack SHA-256 signature does not match its contents.' }
+    }
+    if (pack.signature.algorithm === 'ed25519' && pack.signature.publicKey) {
+      const valid = await verifyAsync(etc.hexToBytes(pack.signature.value), message, etc.hexToBytes(pack.signature.publicKey))
+      return valid ? { valid: true, unsigned: false } : { valid: false, unsigned: false, message: 'Pack Ed25519 signature could not be verified.' }
+    }
+    return { valid: false, unsigned: false, message: 'Pack signature is incomplete.' }
+  } catch {
+    return { valid: false, unsigned: false, message: 'Pack signature verification failed.' }
+  }
 }
 
 export const parseScenarioPack = (text: string): { pack?: ScenarioPack; issues: ValidationIssue[] } => {
@@ -120,6 +172,8 @@ export const packFromScenarios = (scenarios: Scenario[], name = 'Local Incident 
   name,
   version: '1.0.0',
   author: 'Local Operator',
+  schemaVersion: SCENARIO_PACK_SCHEMA_VERSION,
+  minAppVersion: CURRENT_APP_VERSION,
   scenarios,
   assets: [],
 })

@@ -1,9 +1,9 @@
 import { useEffect, useRef, useState, type CSSProperties } from 'react'
 import { scenarios as builtInScenarios } from './data/scenarios'
 import { createIncident, formatDuration, getPhaseIndex, makeEvent, scaleScenarioDuration } from './lib/incidentEngine'
-import { MAX_PACK_BYTES, packFromScenarios, parseScenarioPack, validateScenario } from './lib/packValidator'
-import { registerGlobalTrigger, setTheaterMode } from './lib/native'
-import { clearActiveRunMarker, downloadJson, loadActiveRunMarker, loadReplays, loadScenarioDrafts, loadSettings, saveReplay, saveScenarioDraft, saveSettings, writeActiveRunMarker } from './lib/storage'
+import { MAX_PACK_BYTES, packFromScenarios, parseScenarioPack, validateScenario, verifyPackSignature } from './lib/packValidator'
+import { isTauriRuntime, registerGlobalTrigger, setTheaterMode } from './lib/native'
+import { clearActiveRunMarker, downloadJson, hydrateNativeValue, loadActiveRunMarker, loadReplays, loadScenarioDrafts, loadSettings, saveReplay, saveScenarioDraft, saveSettings, writeActiveRunMarker } from './lib/storage'
 import { createTriggerGuard } from './lib/triggerGuard'
 import type { ActiveIncident, ReplayRecord, Scenario, Settings, ValidationIssue } from './types'
 
@@ -17,6 +17,7 @@ const defaultSettings: Settings = {
   alwaysOnTop: true,
   autoStart: false,
   cooldownSeconds: 5,
+  mirrorSecondary: false,
 }
 
 const readSettings = (): Settings => loadSettings(defaultSettings)
@@ -48,8 +49,26 @@ const pickScenario = (items: Scenario[]) => items[Math.floor(Math.random() * ite
 const replayRecord = (incident: ActiveIncident): ReplayRecord => ({ ...incident, id: `run-${incident.startedAt}`, savedAt: Date.now() })
 const recoveredReplay = (incident: ActiveIncident): ReplayRecord => replayRecord({ ...incident, resolved: true, exitReason: 'ERROR', endedAt: Date.now() })
 
+const isMirrorWindow = () => typeof window !== 'undefined' && new URLSearchParams(window.location.search).get('mirror') === '1'
+
 function App() {
+  return isMirrorWindow() ? <SurveillanceMirror /> : <CommandCenter />
+}
+
+function SurveillanceMirror() {
+  useEffect(() => {
+    const emergencyExit = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') void setTheaterMode(false, false, false)
+    }
+    window.addEventListener('keydown', emergencyExit)
+    return () => window.removeEventListener('keydown', emergencyExit)
+  }, [])
+  return <div className="mirror-shell"><div className="mirror-topline"><span className="live-dot" /> SECONDARY SURVEILLANCE FEED <strong>SIMULATED DATA</strong></div><div className="mirror-grid"><div className="mirror-radar"><span className="mirror-crosshair" /><span className="mirror-sweep" /></div><div className="mirror-copy"><span className="classification">REMOTE DISPLAY // AUXILIARY COMMAND</span><h1>OPERATIONAL THEATER ACTIVE</h1><p>This display is a theatrical mirror. All imagery, coordinates, and incident telemetry are simulated.</p><div className="mirror-status"><span>UPLINK</span><b>STABLE</b><span>THREAT LEVEL</span><b>ABSURD</b><span>RESPONSE</span><b>OVERALLOCATED</b></div></div></div><div className="mirror-footer">HIDDEN CANOPY // PANIC BUTTON // OFFLINE CORE // ESC REMAINS THE EMERGENCY EXIT</div></div>
+}
+
+function CommandCenter() {
   const [recoveryRun] = useState(() => loadActiveRunMarker())
+  const [nativeHydrated, setNativeHydrated] = useState(false)
   const [settings, setSettings] = useState<Settings>(readSettings)
   const [scenarios, setScenarios] = useState<Scenario[]>(() => {
     const drafts = new Map(loadScenarioDrafts().map((scenario) => [scenario.id, scenario]))
@@ -82,7 +101,7 @@ function App() {
     setView('command')
     setNotice('ALERT DISPATCHED // ALL AVAILABLE RESOURCES ALLOCATED')
     playAlert(settings.soundEnabled)
-    void setTheaterMode(true, settings.alwaysOnTop)
+    void setTheaterMode(true, settings.alwaysOnTop, settings.mirrorSecondary)
     return true
   }
 
@@ -98,7 +117,7 @@ function App() {
       saveReplay(replayRecord(completed))
       clearActiveRunMarker()
       triggerGuardRef.current.startCooldown(Date.now(), settings.cooldownSeconds * 1000)
-      void setTheaterMode(false, false)
+      void setTheaterMode(false, false, false)
       setNotice(reason === 'EMERGENCY_EXIT' ? 'EMERGENCY EXIT // THE SITUATION HAS BEEN CONTAINED' : 'INCIDENT CLOSED // NO FURTHER ACTION REQUIRED')
       return completed
     })
@@ -140,6 +159,39 @@ function App() {
   }, [recoveryRun])
 
   useEffect(() => {
+    if (!isTauriRuntime()) {
+      setNativeHydrated(true)
+      return undefined
+    }
+    let cancelled = false
+    void Promise.all([
+      hydrateNativeValue('panic-button-settings'),
+      hydrateNativeValue('panic-button-scenarios'),
+      hydrateNativeValue('panic-button-replays'),
+      hydrateNativeValue('panic-button-active-run'),
+    ]).then(([nativeSettings, nativeScenarios, nativeReplays, nativeActiveRun]) => {
+      if (cancelled) return
+      if (nativeSettings && typeof nativeSettings === 'object') setSettings((current) => ({ ...current, ...(nativeSettings as Partial<Settings>) }))
+      if (Array.isArray(nativeScenarios)) {
+        const drafts = new Map(nativeScenarios.map((scenario) => [scenario.id, scenario]))
+        const mergedBuiltIns = builtInScenarios.map((scenario) => drafts.get(scenario.id) ?? scenario)
+        const custom = nativeScenarios.filter((scenario) => !builtInScenarios.some((builtIn) => builtIn.id === scenario.id))
+        setScenarios([...mergedBuiltIns, ...custom])
+      }
+      if (Array.isArray(nativeReplays) && nativeReplays[0]) setLastReplay(nativeReplays[0] as ActiveIncident)
+      if (!recoveryRun && nativeActiveRun && typeof nativeActiveRun === 'object') {
+        const recovered = recoveredReplay(nativeActiveRun as ActiveIncident)
+        setLastReplay(recovered)
+        saveReplay(recovered)
+        clearActiveRunMarker()
+        setNotice('RECOVERY MODE // PREVIOUS INCIDENT MARKED ABORTED')
+      }
+      setNativeHydrated(true)
+    })
+    return () => { cancelled = true }
+  }, [recoveryRun])
+
+  useEffect(() => {
     const preserveRecoveryMarker = () => {
       const current = incidentRef.current
       if (current && !current.resolved) writeActiveRunMarker(current)
@@ -167,7 +219,7 @@ function App() {
           saveReplay(replayRecord(completed))
           clearActiveRunMarker()
           triggerGuardRef.current.startCooldown(Date.now(), settings.cooldownSeconds * 1000)
-          void setTheaterMode(false, false)
+          void setTheaterMode(false, false, false)
           setNotice('AUTO-DISPATCH COMPLETE // PIZZA-CLASS THREAT RETURNED TO BASELINE')
           return completed
         }
@@ -180,8 +232,9 @@ function App() {
   }, [incident?.resolved, incident?.startedAt, settings.cooldownSeconds, settings.soundEnabled])
 
   useEffect(() => {
+    if (isTauriRuntime() && !nativeHydrated) return
     saveSettings(settings)
-  }, [settings])
+  }, [nativeHydrated, settings])
 
   const updateSettings = (patch: Partial<Settings>) => setSettings((current) => ({ ...current, ...patch }))
   const activeScenario = incident?.scenario ?? editorScenario
@@ -219,11 +272,18 @@ function App() {
       setNotice('PACK REJECTED // VALIDATION FAILED')
       return
     }
+    const signature = await verifyPackSignature(result.pack)
+    if (!signature.valid) {
+      setPackIssues([{ path: 'pack.signature', message: signature.message ?? 'Pack signature verification failed.', severity: 'error' }])
+      setNotice('PACK REJECTED // SIGNATURE VERIFICATION FAILED')
+      return
+    }
     setScenarios((current) => {
       const incoming = new Map(result.pack!.scenarios.map((scenario) => [scenario.id, scenario]))
       return [...current.filter((scenario) => !incoming.has(scenario.id)), ...result.pack!.scenarios]
     })
     setSelectedScenarioId(result.pack.scenarios[0].id)
+    setPackIssues(signature.unsigned ? [{ path: 'pack.signature', message: 'Unsigned local pack accepted; signed updates require Ed25519 verification.', severity: 'warning' }] : result.issues)
     setNotice(`PACK IMPORTED // ${result.pack.name.toUpperCase()}`)
   }
 
@@ -335,7 +395,7 @@ function EditorView({ scenario, scenarios, selectedId, issues, onSelect, onUpdat
 }
 
 function SettingsView({ settings, onUpdate }: { settings: Settings; onUpdate: (patch: Partial<Settings>) => void }) {
-  return <div className="single-column"><section className="panel detail-panel settings-panel"><PanelHeader title="SYSTEM SETTINGS" tag="LOCAL ONLY" /><div className="settings-form"><div className="setting-section"><span className="classification">TRIGGER</span><h2>How should we overreact?</h2><label><span>GLOBAL HOTKEY LABEL</span><input value={settings.triggerLabel} onChange={(event) => onUpdate({ triggerLabel: event.target.value.toUpperCase() })} /><small>Native Tauri builds register Ctrl + Shift + P by default. USB buttons that emit this key are supported.</small></label><label className="range-label"><span>POST-INCIDENT COOLDOWN <b>{settings.cooldownSeconds}s</b></span><input type="range" min="0" max="30" step="1" value={settings.cooldownSeconds} onChange={(event) => onUpdate({ cooldownSeconds: Number(event.target.value) })} /></label></div><div className="setting-section"><span className="classification">THEATRICS</span><h2>Control the spectacle</h2><label className="range-label"><span>DEFAULT INCIDENT LENGTH <b>{settings.durationSeconds}s</b></span><input type="range" min="15" max="300" step="5" value={settings.durationSeconds} onChange={(event) => onUpdate({ durationSeconds: Number(event.target.value) })} /></label><Toggle label="Alert sounds" checked={settings.soundEnabled} onChange={(checked) => onUpdate({ soundEnabled: checked })} /><Toggle label="Reduced motion" checked={settings.reducedMotion} onChange={(checked) => onUpdate({ reducedMotion: checked })} /><Toggle label="Always on top" checked={settings.alwaysOnTop} onChange={(checked) => onUpdate({ alwaysOnTop: checked })} /></div></div></section></div>
+  return <div className="single-column"><section className="panel detail-panel settings-panel"><PanelHeader title="SYSTEM SETTINGS" tag="LOCAL ONLY" /><div className="settings-form"><div className="setting-section"><span className="classification">TRIGGER</span><h2>How should we overreact?</h2><label><span>GLOBAL HOTKEY LABEL</span><input value={settings.triggerLabel} onChange={(event) => onUpdate({ triggerLabel: event.target.value.toUpperCase() })} /><small>Native Tauri builds register Ctrl + Shift + P by default. USB buttons that emit this key are supported.</small></label><label className="range-label"><span>POST-INCIDENT COOLDOWN <b>{settings.cooldownSeconds}s</b></span><input type="range" min="0" max="30" step="1" value={settings.cooldownSeconds} onChange={(event) => onUpdate({ cooldownSeconds: Number(event.target.value) })} /></label></div><div className="setting-section"><span className="classification">THEATRICS</span><h2>Control the spectacle</h2><label className="range-label"><span>DEFAULT INCIDENT LENGTH <b>{settings.durationSeconds}s</b></span><input type="range" min="15" max="300" step="5" value={settings.durationSeconds} onChange={(event) => onUpdate({ durationSeconds: Number(event.target.value) })} /></label><Toggle label="Alert sounds" checked={settings.soundEnabled} onChange={(checked) => onUpdate({ soundEnabled: checked })} /><Toggle label="Reduced motion" checked={settings.reducedMotion} onChange={(checked) => onUpdate({ reducedMotion: checked })} /><Toggle label="Always on top" checked={settings.alwaysOnTop} onChange={(checked) => onUpdate({ alwaysOnTop: checked })} /><Toggle label="Mirror to secondary displays" checked={settings.mirrorSecondary} onChange={(checked) => onUpdate({ mirrorSecondary: checked })} /></div></div></section></div>
 }
 
 function Toggle({ label, checked, onChange }: { label: string; checked: boolean; onChange: (value: boolean) => void }) { return <button className={`toggle-row ${checked ? 'checked' : ''}`} onClick={() => onChange(!checked)}><span>{label}</span><span className="toggle"><i /></span></button> }

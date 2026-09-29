@@ -23,12 +23,15 @@ The repository contains a working engineering build:
 - Versioned, checksummed local storage with backup fallback and interrupted-run recovery.
 - Hotkey debounce plus configurable post-incident cooldown.
 - Scenario-pack byte limits, duplicate-id checks, safe path checks, and SHA-256 manifest validation.
+- Optional Ed25519 pack signature verification and app-version compatibility checks.
+- Native Tauri SQLite key/value persistence with browser fallback.
+- Optional full-screen simulated surveillance mirrors on secondary displays.
 - Local replay persistence and replay JSON export.
 - Local settings for sound, reduced motion, display behavior, and duration.
 - Ten built-in scenarios covering mundane household, office, delivery, and device incidents.
 - Automated Vitest coverage for the incident engine and pack validator.
 
-The current persistence boundary is versioned browser/Tauri local storage with checksums, backup fallback, and crash recovery markers so the same build works in offline browser preview and the desktop shell. SQLite history, signed update manifests, multi-monitor mirroring, and code signing remain later release-hardening work.
+The current persistence boundary is versioned browser/Tauri local storage with checksums, backup fallback, and crash recovery markers, mirrored into a native SQLite store in packaged Tauri builds. Signed pack verification and secondary-display mirrors are supported; code signing and clean-machine acceptance remain external release gates.
 
 This is deliberately theatrical: it does not lock the computer, disable Windows controls, execute scenario code, or make network requests at runtime.
 

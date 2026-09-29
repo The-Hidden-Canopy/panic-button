@@ -58,8 +58,9 @@ export type AssetManifest = {
 }
 
 export type PackSignature = {
-  algorithm: 'sha256'
+  algorithm: 'sha256' | 'ed25519'
   value: string
+  publicKey?: string
 }
 
 export type ScenarioPack = {
@@ -67,6 +68,8 @@ export type ScenarioPack = {
   name: string
   version: string
   author: string
+  schemaVersion?: number
+  minAppVersion?: string
   scenarios: Scenario[]
   assets: AssetManifest[]
   signature?: PackSignature
@@ -110,4 +113,5 @@ export type Settings = {
   alwaysOnTop: boolean
   autoStart: boolean
   cooldownSeconds: number
+  mirrorSecondary: boolean
 }

@@ -1,4 +1,5 @@
 import type { ReplayRecord, Scenario, ScenarioPack, Settings } from '../types'
+import { nativeStorageDelete, nativeStorageGet, nativeStorageSet } from './native'
 
 const SETTINGS_KEY = 'panic-button-settings'
 const SCENARIO_KEY = 'panic-button-scenarios'
@@ -66,7 +67,9 @@ const write = (key: string, value: unknown) => {
   try {
     const current = localStorage.getItem(key)
     if (current) localStorage.setItem(`${key}.backup`, current)
-    localStorage.setItem(key, encodeStored(value))
+    const encoded = encodeStored(value)
+    localStorage.setItem(key, encoded)
+    void nativeStorageSet(key, encoded)
     return true
   } catch {
     return false
@@ -88,9 +91,16 @@ export const loadReplays = () => read<ReplayRecord[]>(REPLAY_KEY, [])
 export const writeActiveRunMarker = (incident: Omit<ReplayRecord, 'id' | 'savedAt'>) => write(ACTIVE_RUN_KEY, incident)
 export const loadActiveRunMarker = () => read<Omit<ReplayRecord, 'id' | 'savedAt'> | null>(ACTIVE_RUN_KEY, null)
 export const clearActiveRunMarker = () => {
-  if (typeof localStorage === 'undefined') return
-  localStorage.removeItem(ACTIVE_RUN_KEY)
-  localStorage.removeItem(`${ACTIVE_RUN_KEY}.backup`)
+  if (typeof localStorage !== 'undefined') {
+    localStorage.removeItem(ACTIVE_RUN_KEY)
+    localStorage.removeItem(`${ACTIVE_RUN_KEY}.backup`)
+  }
+  void nativeStorageDelete(ACTIVE_RUN_KEY)
+}
+
+export const hydrateNativeValue = async (key: string): Promise<unknown | undefined> => {
+  const encoded = await nativeStorageGet(key)
+  return encoded ? decodeStored<unknown>(encoded) : undefined
 }
 
 export const downloadJson = (filename: string, value: ScenarioPack | ReplayRecord) => {

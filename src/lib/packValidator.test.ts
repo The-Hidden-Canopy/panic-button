@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
+import { etc, getPublicKeyAsync, signAsync } from '@noble/ed25519'
 import { scenarios } from '../data/scenarios'
-import { MAX_PACK_BYTES, packFromScenarios, parseScenarioPack, validatePack } from './packValidator'
+import { MAX_PACK_BYTES, canonicalPackPayload, packFromScenarios, parseScenarioPack, validatePack, verifyPackSignature } from './packValidator'
 
 describe('scenario-pack validator', () => {
   it('accepts every built-in scenario', () => {
@@ -45,5 +46,25 @@ describe('scenario-pack validator', () => {
     const pack = { ...packFromScenarios([{ ...scenarios[0], premise: 'Read https://example.invalid now.' }]) }
     const issues = validatePack(pack)
     expect(issues.some((item) => item.message.includes('External URLs'))).toBe(true)
+  })
+
+  it('accepts unsigned local packs but exposes the unsigned state', async () => {
+    const result = await verifyPackSignature(packFromScenarios([scenarios[0]]))
+    expect(result).toEqual({ valid: true, unsigned: true })
+  })
+
+  it('rejects malformed Ed25519 signature metadata', () => {
+    const pack = { ...packFromScenarios([scenarios[0]]), signature: { algorithm: 'ed25519' as const, publicKey: 'bad', value: 'bad' } }
+    const issues = validatePack(pack)
+    expect(issues.some((item) => item.path === 'pack.signature.publicKey')).toBe(true)
+    expect(issues.some((item) => item.path === 'pack.signature.value')).toBe(true)
+  })
+
+  it('verifies a valid Ed25519-signed pack', async () => {
+    const secretKey = etc.hexToBytes('000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f')
+    const unsigned = packFromScenarios([scenarios[0]])
+    const signature = await signAsync(new TextEncoder().encode(canonicalPackPayload(unsigned)), secretKey)
+    const signed = { ...unsigned, signature: { algorithm: 'ed25519' as const, publicKey: etc.bytesToHex(await getPublicKeyAsync(secretKey)), value: etc.bytesToHex(signature) } }
+    await expect(verifyPackSignature(signed)).resolves.toEqual({ valid: true, unsigned: false })
   })
 })
