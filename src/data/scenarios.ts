@@ -4,6 +4,7 @@ const makeScenario = (config: Pick<Scenario, 'id' | 'title' | 'premise' | 'sever
   ...config,
   durationSeconds: 60,
   resolution,
+  audio: [{ id: 'alert', kind: 'alert', caption: 'Alert tone: incident phase changed.', durationMs: 450 }],
   phases: [
     { id: 'p1', label: 'INITIAL ASSESSMENT', durationSeconds: 20, objective: `Confirm the ${subject} has genuinely become a situation.`, alerts: ['MINOR ISSUE CONFIRMED', 'OBSERVATION PROTOCOL ACTIVE'], reportIds: ['r1'] },
     { id: 'p2', label: 'RESOURCE SURGE', durationSeconds: 20, objective: `Deploy unnecessary resources toward the ${subject}.`, alerts: ['ESCALATION AUTHORIZED', 'MORALE REMAINS FRAGILE'], reportIds: ['r2'] },
@@ -46,6 +47,7 @@ const baseScenarios: Scenario[] = [
     durationSeconds: 90,
     accents: ['#ff3d5a', '#ffb347'],
     resolution: 'Pizza arrived. Civilisation will continue, pending garlic-knot inventory.',
+    audio: [{ id: 'siren', kind: 'siren', caption: 'Siren: delivery window compromised.', durationMs: 450 }],
     phases: [
       { id: 'p1', label: 'INITIAL DELAY', durationSeconds: 22, objective: 'Establish whether the pizza is, in fact, still real.', alerts: ['DELIVERY WINDOW COMPROMISED', 'GARLIC KNOTS UNACCOUNTED FOR'], reportIds: ['r1'] },
       { id: 'p2', label: 'ESCALATION', durationSeconds: 30, objective: 'Deploy all available porch-observation assets.', alerts: ['UNKNOWN VEHICLE DETECTED', 'SAUCE TEMPERATURE DECLINING'], reportIds: ['r2'] },
@@ -76,6 +78,7 @@ const baseScenarios: Scenario[] = [
     durationSeconds: 80,
     accents: ['#c084fc', '#59d8ff'],
     resolution: 'Coffee produced. The machine has been placed under observation.',
+    audio: [{ id: 'siren', kind: 'siren', caption: 'Siren: caffeine apparatus unresponsive.', durationMs: 450 }],
     phases: [
       { id: 'p1', label: 'POWER CHECK', durationSeconds: 25, objective: 'Confirm that the machine remains connected to reality.', alerts: ['BREW CYCLE SILENT', 'BUTTON PRESS UNACKNOWLEDGED'], reportIds: ['r1'] },
       { id: 'p2', label: 'MANUAL OVERRIDE', durationSeconds: 25, objective: 'Apply measured encouragement to the apparatus.', alerts: ['WATER LEVEL NOMINAL', 'BEANS REFUSE TO COOPERATE'], reportIds: ['r2'] },

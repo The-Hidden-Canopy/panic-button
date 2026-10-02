@@ -56,6 +56,7 @@ export const scenarioDigest = (scenario: Scenario) => deterministicDigest({
   resourceBounds: scenario.resourceBounds,
   resolutionRules: scenario.resolutionRules,
   presentationProfile: scenario.presentationProfile,
+  audio: scenario.audio,
 })
 
 export const createSeed = (scenarioId: string, startedAt: number) => deterministicDigest(`${scenarioId}:${startedAt}`)
@@ -194,6 +195,12 @@ export const validateScenarioGraph = (scenario: Scenario, path = 'scenario'): Va
   }
   const flashLimit = migrated.presentationProfile?.maxFlashEventsPerMinute
   if (flashLimit !== undefined && (!Number.isInteger(flashLimit) || flashLimit < 0 || flashLimit > 60)) issues.push({ path: `${path}.presentationProfile.maxFlashEventsPerMinute`, message: 'Flash event limits must be integers from 0 to 60 per minute.', severity: 'error' })
+  const audioKinds = new Set(['siren', 'radio', 'alert', 'stinger'])
+  for (const cue of migrated.audio ?? []) {
+    if (!cue.id || !cue.caption || !audioKinds.has(cue.kind)) issues.push({ path: `${path}.audio.${cue.id}`, message: 'Audio cues require a closed kind, id, and caption.', severity: 'error' })
+    if (!Number.isInteger(cue.durationMs) || cue.durationMs < 50 || cue.durationMs > 30_000) issues.push({ path: `${path}.audio.${cue.id}.durationMs`, message: 'Audio cue duration must be an integer from 50 to 30000 milliseconds.', severity: 'error' })
+    if (cue.volume !== undefined && (!Number.isFinite(cue.volume) || cue.volume < 0 || cue.volume > 1)) issues.push({ path: `${path}.audio.${cue.id}.volume`, message: 'Audio cue volume must be between 0 and 1.', severity: 'error' })
+  }
   return issues
 }
 

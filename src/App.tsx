@@ -6,6 +6,7 @@ import { MAX_PACK_BYTES, admitPack, packFromScenarios, parseScenarioPack, valida
 import { isTauriRuntime, nativeIncidentStoreEvent, nativeProjectionGet, nativeProjectionSet, nativeTrustedSigners, registerGlobalTrigger, setTheaterMode } from './lib/native'
 import { clearActiveRunMarker, downloadJson, hydrateNativeValue, installPackRecord, loadActiveRunMarker, loadReplays, loadScenarioDrafts, loadSettings, loadStagedPacks, packRecordFor, savePackRecord, saveReplay, saveScenarioDraft, saveSettings, writeActiveRunMarker } from './lib/storage'
 import { createTriggerGuard } from './lib/triggerGuard'
+import { playLocalCue, stopLocalCues } from './lib/audio'
 import type { ActiveIncident, PackRecord, ReplayRecord, Scenario, ScenarioAction, ScenarioNode, Settings, TrustedSigner, ValidationIssue } from './types'
 
 type View = 'command' | 'timeline' | 'reports' | 'editor' | 'settings'
@@ -28,28 +29,6 @@ const defaultSettings: Settings = {
 }
 
 const readSettings = (): Settings => loadSettings(defaultSettings)
-
-const playAlert = (enabled: boolean, volume = 0.08) => {
-  if (!enabled || typeof window === 'undefined') return
-  try {
-    const context = new AudioContext()
-    const oscillator = context.createOscillator()
-    const gain = context.createGain()
-    oscillator.type = 'sawtooth'
-    oscillator.frequency.setValueAtTime(440, context.currentTime)
-    oscillator.frequency.linearRampToValueAtTime(880, context.currentTime + 0.18)
-    gain.gain.setValueAtTime(0.0001, context.currentTime)
-    gain.gain.exponentialRampToValueAtTime(Math.max(0.0001, Math.min(0.2, volume)), context.currentTime + 0.03)
-    gain.gain.exponentialRampToValueAtTime(0.0001, context.currentTime + 0.42)
-    oscillator.connect(gain)
-    gain.connect(context.destination)
-    oscillator.start()
-    oscillator.stop(context.currentTime + 0.45)
-    window.setTimeout(() => void context.close(), 600)
-  } catch {
-    // Audio is decorative; a locked-down browser may reject it.
-  }
-}
 
 const pickScenario = (items: Scenario[]) => items[Math.floor(Math.random() * items.length)] ?? items[0]
 
@@ -91,7 +70,7 @@ function SurveillanceMirror() {
   const [projection, setProjection] = useState<{ scenarioId?: string; lifecycle?: string; simulationTimeMs?: number; phaseIndex?: number; markerCount?: number }>({})
   useEffect(() => {
     const emergencyExit = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') void setTheaterMode(false, false, false)
+      if (event.key === 'Escape') { stopLocalCues(); void setTheaterMode(false, false, false) }
     }
     window.addEventListener('keydown', emergencyExit)
     return () => window.removeEventListener('keydown', emergencyExit)
@@ -150,8 +129,8 @@ function CommandCenter() {
     setLastReplay(null)
     setView('command')
     setNotice('ALERT DISPATCHED // ALL AVAILABLE RESOURCES ALLOCATED')
-    if (settings.captionsEnabled) setAudioCaption('ALERT TONE // INCIDENT OPENED')
-    playAlert(settings.soundEnabled, settings.effectsVolume)
+    if (settings.captionsEnabled) setAudioCaption(scaledScenario.audio?.[0]?.caption ?? 'ALERT TONE // INCIDENT OPENED')
+    playLocalCue('siren', settings.soundEnabled, settings.alertVolume)
     void setTheaterMode(true, settings.alwaysOnTop, settings.mirrorSecondary)
     return true
   }
@@ -174,6 +153,7 @@ function CommandCenter() {
         : { ...current, resolved: true, exitReason: reason, endedAt: Date.now() }
       runtimeRef.current = finalRuntime
       if (finalRuntime) persistRuntimeJournal(finalRuntime, current.startedAt)
+      stopLocalCues()
       setLastReplay(completed)
       saveReplay(replayRecord(completed))
       clearActiveRunMarker()
@@ -294,8 +274,8 @@ function CommandCenter() {
         persistRuntimeJournal(updatedRuntime, current.startedAt)
         const phaseChanged = updatedRuntime.state.phaseIndex !== current.phaseIndex
         if (phaseChanged) {
-          playAlert(settings.soundEnabled, settings.effectsVolume)
-          if (settings.captionsEnabled) setAudioCaption(`ALERT TONE // ${updatedRuntime.state.alerts.at(-1) ?? 'ESCALATION EVENT'}`)
+          playLocalCue('alert', settings.soundEnabled, settings.effectsVolume)
+          if (settings.captionsEnabled) setAudioCaption(current.scenario.audio?.find((cue) => cue.kind === 'alert')?.caption ?? `ALERT TONE // ${updatedRuntime.state.alerts.at(-1) ?? 'ESCALATION EVENT'}`)
         }
         const updated = projectActiveIncident(updatedRuntime, current.scenario, current.startedAt)
         if (updatedRuntime.state.lifecycle === 'SUMMARY') {

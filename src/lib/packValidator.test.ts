@@ -86,4 +86,10 @@ describe('scenario-pack validator', () => {
     expect(issues.some((issue) => issue.message.includes('terminal'))).toBe(true)
     expect(issues.some((issue) => issue.message.includes('Cycles require'))).toBe(true)
   })
+
+  it('requires bounded captioned local audio cues', () => {
+    const invalid = { ...scenarios[0], audio: [{ id: 'bad', kind: 'network' as never, caption: '', durationMs: 1 }] }
+    const issues = validatePack({ ...packFromScenarios([invalid]) })
+    expect(issues.some((issue) => issue.path.includes('.audio.bad'))).toBe(true)
+  })
 })
