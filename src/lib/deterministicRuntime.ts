@@ -50,6 +50,10 @@ export const scenarioDigest = (scenario: Scenario) => deterministicDigest({
   markers: scenario.markers,
   nodes: scenario.nodes,
   actions: scenario.actions,
+  initialState: scenario.initialState,
+  resourceBounds: scenario.resourceBounds,
+  resolutionRules: scenario.resolutionRules,
+  presentationProfile: scenario.presentationProfile,
 })
 
 export const createSeed = (scenarioId: string, startedAt: number) => deterministicDigest(`${scenarioId}:${startedAt}`)
@@ -110,6 +114,9 @@ export const validateScenarioGraph = (scenario: Scenario, path = 'scenario'): Va
   const issues: ValidationIssue[] = []
   const migrated = migrateScenarioToV2(scenario)
   const nodes = migrated.nodes ?? []
+  const validNodeTypes = new Set(['PHASE', 'WAIT', 'ALERT', 'REPORT', 'RESOURCE_MUTATION', 'MARKER_MUTATION', 'CHOICE', 'CONDITION', 'RANDOM_CHOICE', 'OBJECTIVE', 'TERMINAL'])
+  const validConditionKinds = new Set(['resource_gte', 'resource_lte', 'flag_equals', 'action_seen', 'objective_complete', 'time_gte', 'random_bucket'])
+  const validActionKinds = new Set(['ACKNOWLEDGE_ALERT', 'DEPLOY_RESOURCE', 'MOVE_RESOURCE', 'REQUEST_REPORT', 'SELECT_RESPONSE', 'PIN_MARKER', 'ABORT_INCIDENT'])
   const ids = new Set<string>()
   let edges = 0
   for (const [index, node] of nodes.entries()) {
@@ -117,9 +124,18 @@ export const validateScenarioGraph = (scenario: Scenario, path = 'scenario'): Va
     if (ids.has(node.id)) issues.push({ path: `${nodePath}.id`, message: `Duplicate node id: ${node.id}.`, severity: 'error' })
     ids.add(node.id)
     if (!node.id.trim()) issues.push({ path: `${nodePath}.id`, message: 'Node id is required.', severity: 'error' })
+    if (!validNodeTypes.has(node.type)) issues.push({ path: `${nodePath}.type`, message: `Unsupported node type: ${String(node.type)}.`, severity: 'error' })
     if (node.durationMs !== undefined && (!Number.isInteger(node.durationMs) || node.durationMs < 0 || node.durationMs > 300_000)) issues.push({ path: `${nodePath}.durationMs`, message: 'Node duration must be an integer from 0 to 300000 milliseconds.', severity: 'error' })
+    if (node.maxVisits !== undefined && (!Number.isInteger(node.maxVisits) || node.maxVisits < 1 || node.maxVisits > 16)) issues.push({ path: `${nodePath}.maxVisits`, message: 'Bounded loop counts must be integers from 1 to 16.', severity: 'error' })
     for (const target of node.next ?? []) edges += 1, void target
     for (const branch of node.branches ?? []) edges += 1, void branch
+    const conditions = [node.condition, ...(node.branches ?? []).map((branch) => branch.when)].filter(Boolean)
+    for (const condition of conditions) {
+      if (!validConditionKinds.has(String(condition?.kind))) issues.push({ path: `${nodePath}.condition`, message: `Unsupported condition kind: ${String(condition?.kind)}.`, severity: 'error' })
+      if (condition?.kind === 'random_bucket' && (!Number.isInteger(condition.bucket) || condition.bucket < 0 || condition.bucket > 99)) issues.push({ path: `${nodePath}.condition.bucket`, message: 'Random buckets must be integers from 0 to 99.', severity: 'error' })
+      if ((condition?.kind === 'resource_gte' || condition?.kind === 'resource_lte') && !migrated.resources.some((resource) => resource.id === condition.resourceId)) issues.push({ path: `${nodePath}.condition.resourceId`, message: `Unknown resource id: ${condition.resourceId}.`, severity: 'error' })
+      if (condition?.kind === 'action_seen' && !(migrated.actions ?? []).some((action) => action.id === condition.actionId)) issues.push({ path: `${nodePath}.condition.actionId`, message: `Unknown action id: ${condition.actionId}.`, severity: 'error' })
+    }
   }
   if (nodes.length > 128) issues.push({ path: `${path}.nodes`, message: 'Scenario graphs may contain no more than 128 nodes.', severity: 'error' })
   if (edges > 256) issues.push({ path: `${path}.nodes`, message: 'Scenario graphs may contain no more than 256 edges.', severity: 'error' })
@@ -141,10 +157,41 @@ export const validateScenarioGraph = (scenario: Scenario, path = 'scenario'): Va
   }
   for (const node of nodes) if (!reachable.has(node.id)) issues.push({ path: `${path}.nodes.${node.id}`, message: 'Node is unreachable from the graph start.', severity: 'error' })
   if (!nodes.some((node) => node.type === 'TERMINAL')) issues.push({ path: `${path}.nodes`, message: 'Scenario graph requires a terminal node.', severity: 'error' })
+  const outgoing = new Map(nodes.map((node) => [node.id, [...(node.next ?? []), ...(node.branches ?? []).map((branch) => branch.next)]]))
+  const terminalIds = new Set(nodes.filter((node) => node.type === 'TERMINAL').map((node) => node.id))
+  const canReachTerminal = (startId: string, seen = new Set<string>()): boolean => {
+    if (terminalIds.has(startId)) return true
+    if (seen.has(startId)) return false
+    const nextSeen = new Set(seen).add(startId)
+    return (outgoing.get(startId) ?? []).some((target) => canReachTerminal(target, nextSeen))
+  }
+  for (const node of nodes) if (!canReachTerminal(node.id)) issues.push({ path: `${path}.nodes.${node.id}`, message: 'Node cannot reach a terminal without an unbounded cycle.', severity: 'error' })
+  const visitPath = (nodeId: string, stack: string[]) => {
+    if (stack.includes(nodeId)) {
+      const node = byId.get(nodeId)
+      if (!node?.maxVisits) issues.push({ path: `${path}.nodes.${nodeId}`, message: 'Cycles require an explicit bounded maxVisits value.', severity: 'error' })
+      return
+    }
+    for (const target of outgoing.get(nodeId) ?? []) visitPath(target, [...stack, nodeId])
+  }
+  if (nodes[0]) visitPath(nodes[0].id, [])
   for (const action of migrated.actions ?? []) {
     if (!action.id || !action.label || !action.kind) issues.push({ path: `${path}.actions`, message: 'Actions require id, label, and a closed action kind.', severity: 'error' })
+    if (!validActionKinds.has(action.kind)) issues.push({ path: `${path}.actions.${action.id}.kind`, message: `Unsupported action kind: ${String(action.kind)}.`, severity: 'error' })
     if (action.amount !== undefined && (!Number.isFinite(action.amount) || Math.abs(action.amount) > 100_000)) issues.push({ path: `${path}.actions.${action.id}`, message: 'Action amounts must be finite and bounded.', severity: 'error' })
+    if (action.targetNodeId && !byId.has(action.targetNodeId)) issues.push({ path: `${path}.actions.${action.id}.targetNodeId`, message: `Unknown target node id: ${action.targetNodeId}.`, severity: 'error' })
+    if (action.consequence && (!Number.isInteger(action.consequence.delayMs) || action.consequence.delayMs < 0 || action.consequence.delayMs > 300_000)) issues.push({ path: `${path}.actions.${action.id}.consequence.delayMs`, message: 'Consequence delay must be an integer from 0 to 300000 milliseconds.', severity: 'error' })
   }
+  const maxScheduledEvents = migrated.maxScheduledEvents ?? 512
+  if (!Number.isInteger(maxScheduledEvents) || maxScheduledEvents < 1 || maxScheduledEvents > 4_000) issues.push({ path: `${path}.maxScheduledEvents`, message: 'Maximum scheduled events must be an integer from 1 to 4000.', severity: 'error' })
+  for (const resource of migrated.resources) {
+    const bounds = migrated.resourceBounds?.[resource.id]
+    const minimum = bounds?.min ?? resource.minimum ?? 0
+    const maximum = bounds?.max ?? resource.maximum ?? Math.max(resource.value + 10, resource.value * 4)
+    if (!Number.isFinite(minimum) || !Number.isFinite(maximum) || minimum > maximum || resource.value < minimum || resource.value > maximum) issues.push({ path: `${path}.resources.${resource.id}`, message: 'Resource initial value and bounds must be finite and ordered.', severity: 'error' })
+  }
+  const flashLimit = migrated.presentationProfile?.maxFlashEventsPerMinute
+  if (flashLimit !== undefined && (!Number.isInteger(flashLimit) || flashLimit < 0 || flashLimit > 60)) issues.push({ path: `${path}.presentationProfile.maxFlashEventsPerMinute`, message: 'Flash event limits must be integers from 0 to 60 per minute.', severity: 'error' })
   return issues
 }
 
@@ -159,12 +206,12 @@ const initialState = (scenario: Scenario, seed: string, incidentId: string): Inc
   phaseIndex: 0,
   currentNodeId: undefined,
   phases: scenario.phases.map((phase) => phase.id),
-  resources: scenario.resources.map((resource) => ({ ...resource, min: scenario.resourceBounds?.[resource.id]?.min ?? 0, max: scenario.resourceBounds?.[resource.id]?.max ?? Math.max(resource.value + 10, resource.value * 4) })),
+  resources: scenario.resources.map((resource) => ({ ...resource, min: scenario.resourceBounds?.[resource.id]?.min ?? resource.minimum ?? 0, max: scenario.resourceBounds?.[resource.id]?.max ?? resource.maximum ?? Math.max(resource.value + 10, resource.value * 4) })),
   markers: [],
   reports: [],
   alerts: [],
   objectives: {},
-  flags: {},
+  flags: { ...(scenario.initialState?.flags ?? {}) },
   actionsSeen: [],
   pendingConsequences: [],
   visitCounts: {},

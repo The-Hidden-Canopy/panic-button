@@ -16,6 +16,9 @@ export type Resource = {
   unit: string
   icon: string
   color: string
+  minimum?: number
+  maximum?: number
+  presentation?: string
 }
 
 export type SituationReport = {
@@ -52,6 +55,19 @@ export type Scenario = {
   nodes?: ScenarioNode[]
   actions?: ScenarioAction[]
   resourceBounds?: Record<string, { min: number; max: number }>
+  initialState?: {
+    flags?: Record<string, boolean | string | number>
+  }
+  maxScheduledEvents?: number
+  resolutionRules?: Array<{ id: string; when?: ScenarioCondition; text: string }>
+  presentationProfile?: PresentationProfile
+}
+
+export type PresentationProfile = {
+  maxFlashEventsPerMinute?: number
+  maxAlertsPerMinute?: number
+  reducedMotionSafe?: boolean
+  captionsRequired?: boolean
 }
 
 export type ScenarioNodeType = 'PHASE' | 'WAIT' | 'ALERT' | 'REPORT' | 'RESOURCE_MUTATION' | 'MARKER_MUTATION' | 'CHOICE' | 'CONDITION' | 'RANDOM_CHOICE' | 'OBJECTIVE' | 'TERMINAL'
@@ -92,6 +108,13 @@ export type ScenarioAction = {
   markerId?: string
   targetNodeId?: string
   enabled?: boolean
+  consequence?: {
+    delayMs: number
+    resourceId?: string
+    delta?: number
+    flag?: string
+    value?: boolean | string | number
+  }
 }
 
 export type AssetManifest = {
@@ -108,6 +131,35 @@ export type PackSignature = {
   publicKey?: string
 }
 
+export type PackSigner = {
+  fingerprint: string
+  displayName: string
+  publicKey: string
+}
+
+export type PackTrustState = 'TRUSTED' | 'LOCAL_UNSIGNED' | 'VALID_UNTRUSTED' | 'BLOCKED' | 'INVALID'
+
+export type TrustedSigner = PackSigner & { trustState: 'trusted' | 'local' | 'blocked' | 'unknown' }
+
+export type PackAdmission = {
+  signatureValid: boolean
+  signerKnown: boolean
+  signerTrusted: boolean
+  state: PackTrustState
+  message?: string
+}
+
+export type PackInstallState = 'STAGED' | 'INSTALLED' | 'RETIRED'
+
+export type PackRecord = {
+  pack: ScenarioPack
+  digest: string
+  admission: PackAdmission
+  state: PackInstallState
+  stagedAt: number
+  installedAt?: number
+}
+
 export type ScenarioPack = {
   id: string
   name: string
@@ -118,6 +170,7 @@ export type ScenarioPack = {
   scenarios: Scenario[]
   assets: AssetManifest[]
   signature?: PackSignature
+  signer?: PackSigner
 }
 
 export type ValidationIssue = {

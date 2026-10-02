@@ -1,5 +1,6 @@
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::Serialize;
+use serde_json::json;
 use std::fs;
 use tauri::{AppHandle, Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
 use tauri_plugin_global_shortcut::ShortcutState;
@@ -54,6 +55,27 @@ fn storage_connection(app: &AppHandle) -> Result<Connection, String> {
                  display_name TEXT NOT NULL,
                  public_key TEXT NOT NULL,
                  trust_state TEXT NOT NULL,
+                 updated_at INTEGER NOT NULL
+             );
+             CREATE TABLE IF NOT EXISTS settings (
+                 key TEXT PRIMARY KEY NOT NULL,
+                 value TEXT NOT NULL,
+                 updated_at INTEGER NOT NULL
+             );
+             CREATE TABLE IF NOT EXISTS scenario_packs (
+                 pack_id TEXT NOT NULL,
+                 version TEXT NOT NULL,
+                 digest TEXT NOT NULL,
+                 pack_json TEXT NOT NULL,
+                 admission_json TEXT NOT NULL,
+                 install_state TEXT NOT NULL,
+                 staged_at INTEGER NOT NULL,
+                 installed_at INTEGER,
+                 PRIMARY KEY (pack_id, version)
+             );
+             CREATE TABLE IF NOT EXISTS scenario_drafts (
+                 scenario_id TEXT PRIMARY KEY NOT NULL,
+                 scenario_json TEXT NOT NULL,
                  updated_at INTEGER NOT NULL
              );",
         )
@@ -136,6 +158,116 @@ fn trusted_signers(app: AppHandle) -> Result<Vec<String>, String> {
     let connection = storage_connection(&app)?;
     let mut statement = connection
         .prepare("SELECT json_object('fingerprint', fingerprint, 'displayName', display_name, 'publicKey', public_key, 'trustState', trust_state) FROM trusted_signers ORDER BY display_name ASC")
+        .map_err(|error| error.to_string())?;
+    let rows = statement
+        .query_map([], |row| row.get::<_, String>(0))
+        .map_err(|error| error.to_string())?;
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn pack_stage(
+    app: AppHandle,
+    pack_id: String,
+    version: String,
+    digest: String,
+    pack_json: String,
+    admission_json: String,
+    install_state: String,
+    staged_at: i64,
+) -> Result<(), String> {
+    if !matches!(install_state.as_str(), "STAGED" | "INSTALLED" | "RETIRED") {
+        return Err("unsupported pack install state".to_string());
+    }
+    let connection = storage_connection(&app)?;
+    connection
+        .execute(
+            "INSERT INTO scenario_packs (pack_id, version, digest, pack_json, admission_json, install_state, staged_at, installed_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, CASE WHEN ?6 = 'INSTALLED' THEN unixepoch() ELSE NULL END)
+             ON CONFLICT(pack_id, version) DO UPDATE SET digest = excluded.digest, pack_json = excluded.pack_json, admission_json = excluded.admission_json, install_state = excluded.install_state, staged_at = excluded.staged_at, installed_at = excluded.installed_at",
+            params![pack_id, version, digest, pack_json, admission_json, install_state, staged_at],
+        )
+        .map(|_| ())
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn pack_install(
+    app: AppHandle,
+    pack_id: String,
+    version: String,
+    installed_at: i64,
+) -> Result<(), String> {
+    let connection = storage_connection(&app)?;
+    connection
+        .execute(
+            "UPDATE scenario_packs SET install_state = 'INSTALLED', installed_at = ?3 WHERE pack_id = ?1 AND version = ?2",
+            params![pack_id, version, installed_at],
+        )
+        .map(|_| ())
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn pack_list(app: AppHandle) -> Result<Vec<String>, String> {
+    let connection = storage_connection(&app)?;
+    let mut statement = connection
+        .prepare("SELECT pack_id, version, digest, pack_json, admission_json, install_state, staged_at, installed_at FROM scenario_packs ORDER BY staged_at DESC")
+        .map_err(|error| error.to_string())?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok(json!({
+                "packId": row.get::<_, String>(0)?,
+                "version": row.get::<_, String>(1)?,
+                "digest": row.get::<_, String>(2)?,
+                "packJson": row.get::<_, String>(3)?,
+                "admissionJson": row.get::<_, String>(4)?,
+                "state": row.get::<_, String>(5)?,
+                "stagedAt": row.get::<_, i64>(6)?,
+                "installedAt": row.get::<_, Option<i64>>(7)?
+            })
+            .to_string())
+        })
+        .map_err(|error| error.to_string())?;
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn pack_remove(app: AppHandle, pack_id: String, version: String) -> Result<(), String> {
+    let connection = storage_connection(&app)?;
+    connection
+        .execute(
+            "DELETE FROM scenario_packs WHERE pack_id = ?1 AND version = ?2",
+            params![pack_id, version],
+        )
+        .map(|_| ())
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn draft_save(
+    app: AppHandle,
+    scenario_id: String,
+    scenario_json: String,
+    updated_at: i64,
+) -> Result<(), String> {
+    let connection = storage_connection(&app)?;
+    connection
+        .execute(
+            "INSERT INTO scenario_drafts (scenario_id, scenario_json, updated_at) VALUES (?1, ?2, ?3)
+             ON CONFLICT(scenario_id) DO UPDATE SET scenario_json = excluded.scenario_json, updated_at = excluded.updated_at",
+            params![scenario_id, scenario_json, updated_at],
+        )
+        .map(|_| ())
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn draft_list(app: AppHandle) -> Result<Vec<String>, String> {
+    let connection = storage_connection(&app)?;
+    let mut statement = connection
+        .prepare("SELECT scenario_json FROM scenario_drafts ORDER BY updated_at DESC")
         .map_err(|error| error.to_string())?;
     let rows = statement
         .query_map([], |row| row.get::<_, String>(0))
@@ -247,6 +379,12 @@ pub fn run() {
             incident_load_events,
             trust_signer,
             trusted_signers,
+            pack_stage,
+            pack_install,
+            pack_list,
+            pack_remove,
+            draft_save,
+            draft_list,
             set_surveillance_windows
         ])
         .run(tauri::generate_context!())

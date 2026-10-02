@@ -1,5 +1,5 @@
 import { etc, verifyAsync } from '@noble/ed25519'
-import type { Scenario, ScenarioPack, ValidationIssue } from '../types'
+import type { PackAdmission, PackSigner, Scenario, ScenarioPack, TrustedSigner, ValidationIssue } from '../types'
 import { validateScenarioGraph } from './deterministicRuntime'
 
 const MIN_DURATION = 15
@@ -133,6 +133,12 @@ export const validatePack = (pack: ScenarioPack): ValidationIssue[] => {
       issues.push(issue('pack.signature.algorithm', 'Unsupported pack signature algorithm.'))
     }
   }
+  if (pack.signer) {
+    if (typeof pack.signer.fingerprint !== 'string' || !/^[a-f0-9]{16,128}$/i.test(pack.signer.fingerprint)) issues.push(issue('pack.signer.fingerprint', 'Signer fingerprints must be hexadecimal values.'))
+    if (typeof pack.signer.displayName !== 'string' || !pack.signer.displayName.trim()) issues.push(issue('pack.signer.displayName', 'Signer display name is required.'))
+    if (typeof pack.signer.publicKey !== 'string' || !hexDigest(pack.signer.publicKey, 64)) issues.push(issue('pack.signer.publicKey', 'Signer public keys must be 32-byte hexadecimal values.'))
+    if (pack.signature?.algorithm === 'ed25519' && pack.signature.publicKey && pack.signer.publicKey.toLowerCase() !== pack.signature.publicKey.toLowerCase()) issues.push(issue('pack.signer.publicKey', 'Signer public key must match the Ed25519 signature key.'))
+  }
   scanForbiddenKeys(pack, 'pack', issues)
   return issues
 }
@@ -155,6 +161,26 @@ export const verifyPackSignature = async (pack: ScenarioPack): Promise<{ valid: 
   } catch {
     return { valid: false, unsigned: false, message: 'Pack signature verification failed.' }
   }
+}
+
+export const packSignerFingerprint = async (publicKey: string) => {
+  if (!globalThis.crypto?.subtle) return publicKey.toLowerCase()
+  const digest = await globalThis.crypto.subtle.digest('SHA-256', new TextEncoder().encode(publicKey.toLowerCase()))
+  return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, '0')).join('')
+}
+
+export const admitPack = async (pack: ScenarioPack, trustedSigners: TrustedSigner[] = []): Promise<PackAdmission> => {
+  const signature = await verifyPackSignature(pack)
+  if (!signature.valid) return { signatureValid: false, signerKnown: false, signerTrusted: false, state: 'INVALID', message: signature.message }
+  if (signature.unsigned) return { signatureValid: true, signerKnown: false, signerTrusted: false, state: 'LOCAL_UNSIGNED', message: 'Unsigned local authoring pack.' }
+  if (!pack.signer) return { signatureValid: true, signerKnown: false, signerTrusted: false, state: 'VALID_UNTRUSTED', message: 'Signature is valid, but no trusted signer identity is attached.' }
+  const fingerprint = await packSignerFingerprint(pack.signer.publicKey)
+  const signer = trustedSigners.find((item) => item.fingerprint.toLowerCase() === pack.signer?.fingerprint.toLowerCase() || item.publicKey.toLowerCase() === pack.signer?.publicKey.toLowerCase())
+  const signerKnown = Boolean(signer)
+  const signerTrusted = signer?.trustState === 'trusted'
+  if (signer?.trustState === 'blocked') return { signatureValid: true, signerKnown, signerTrusted: false, state: 'BLOCKED', message: 'The pack signer is explicitly blocked.' }
+  if (pack.signer.fingerprint.toLowerCase() !== fingerprint.slice(0, pack.signer.fingerprint.length).toLowerCase()) return { signatureValid: true, signerKnown, signerTrusted, state: 'VALID_UNTRUSTED', message: 'Signer fingerprint does not match the pack public key.' }
+  return { signatureValid: true, signerKnown, signerTrusted, state: signerTrusted ? 'TRUSTED' : 'VALID_UNTRUSTED', message: signerTrusted ? undefined : 'Signature is valid but signer trust has not been granted.' }
 }
 
 export const parseScenarioPack = (text: string): { pack?: ScenarioPack; issues: ValidationIssue[] } => {

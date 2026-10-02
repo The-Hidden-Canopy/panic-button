@@ -1,10 +1,12 @@
-import type { ReplayRecord, Scenario, ScenarioPack, Settings } from '../types'
-import { nativeStorageDelete, nativeStorageGet, nativeStorageSet } from './native'
+import type { PackRecord, ReplayRecord, Scenario, ScenarioPack, Settings } from '../types'
+import { nativeDraftSave, nativePackInstall, nativePackStage, nativeStorageDelete, nativeStorageGet, nativeStorageSet } from './native'
+import { deterministicDigest } from './deterministicRuntime'
 
 const SETTINGS_KEY = 'panic-button-settings'
 const SCENARIO_KEY = 'panic-button-scenarios'
 const REPLAY_KEY = 'panic-button-replays'
 const ACTIVE_RUN_KEY = 'panic-button-active-run'
+const PACK_KEY = 'panic-button-pack-records'
 const STORAGE_VERSION = 1
 const MAX_REPLAYS = 25
 
@@ -81,7 +83,9 @@ export const saveSettings = (settings: Settings) => write(SETTINGS_KEY, settings
 export const loadScenarioDrafts = (): Scenario[] => read<Scenario[]>(SCENARIO_KEY, [])
 export const saveScenarioDraft = (scenario: Scenario) => {
   const drafts = loadScenarioDrafts().filter((item) => item.id !== scenario.id)
-  return write(SCENARIO_KEY, [...drafts, scenario])
+  const saved = write(SCENARIO_KEY, [...drafts, scenario])
+  void nativeDraftSave(scenario)
+  return saved
 }
 export const saveReplay = (replay: ReplayRecord) => {
   const replays = read<ReplayRecord[]>(REPLAY_KEY, [])
@@ -97,6 +101,28 @@ export const clearActiveRunMarker = () => {
   }
   void nativeStorageDelete(ACTIVE_RUN_KEY)
 }
+
+export const loadPackRecords = (): PackRecord[] => read<PackRecord[]>(PACK_KEY, [])
+export const savePackRecord = (record: PackRecord) => {
+  const records = loadPackRecords().filter((item) => !(item.pack.id === record.pack.id && item.pack.version === record.pack.version))
+  const saved = write(PACK_KEY, [record, ...records].slice(0, 100))
+  void nativePackStage(record)
+  return saved
+}
+export const loadInstalledPacks = () => loadPackRecords().filter((record) => record.state === 'INSTALLED')
+export const loadStagedPacks = () => loadPackRecords().filter((record) => record.state === 'STAGED')
+export const installPackRecord = (record: PackRecord) => {
+  const installed = { ...record, state: 'INSTALLED' as const, installedAt: Date.now() }
+  const saved = savePackRecord(installed)
+  void nativePackInstall(record.pack.id, record.pack.version)
+  return saved
+}
+export const retirePackRecord = (packId: string, version: string) => {
+  const record = loadPackRecords().find((item) => item.pack.id === packId && item.pack.version === version)
+  if (!record) return false
+  return savePackRecord({ ...record, state: 'RETIRED' })
+}
+export const packRecordFor = (pack: ScenarioPack, admission: PackRecord['admission'], state: PackRecord['state'] = 'STAGED'): PackRecord => ({ pack, admission, state, digest: deterministicDigest(JSON.stringify(pack)), stagedAt: Date.now(), ...(state === 'INSTALLED' ? { installedAt: Date.now() } : {}) })
 
 export const hydrateNativeValue = async (key: string): Promise<unknown | undefined> => {
   const encoded = await nativeStorageGet(key)

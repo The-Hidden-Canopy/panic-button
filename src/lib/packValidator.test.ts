@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { etc, getPublicKeyAsync, signAsync } from '@noble/ed25519'
 import { scenarios } from '../data/scenarios'
-import { MAX_PACK_BYTES, canonicalPackPayload, packFromScenarios, parseScenarioPack, validatePack, verifyPackSignature } from './packValidator'
+import { MAX_PACK_BYTES, admitPack, canonicalPackPayload, packFromScenarios, packSignerFingerprint, parseScenarioPack, validatePack, verifyPackSignature } from './packValidator'
 
 describe('scenario-pack validator', () => {
   it('accepts every built-in scenario', () => {
@@ -66,5 +66,24 @@ describe('scenario-pack validator', () => {
     const signature = await signAsync(new TextEncoder().encode(canonicalPackPayload(unsigned)), secretKey)
     const signed = { ...unsigned, signature: { algorithm: 'ed25519' as const, publicKey: etc.bytesToHex(await getPublicKeyAsync(secretKey)), value: etc.bytesToHex(signature) } }
     await expect(verifyPackSignature(signed)).resolves.toEqual({ valid: true, unsigned: false })
+  })
+
+  it('separates signature validity from trusted signer admission', async () => {
+    const secretKey = etc.hexToBytes('000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f')
+    const publicKey = etc.bytesToHex(await getPublicKeyAsync(secretKey))
+    const unsigned = { ...packFromScenarios([scenarios[0]]), signer: { fingerprint: await packSignerFingerprint(publicKey), displayName: 'Local Test Signer', publicKey } }
+    const signature = await signAsync(new TextEncoder().encode(canonicalPackPayload(unsigned)), secretKey)
+    const signed = { ...unsigned, signature: { algorithm: 'ed25519' as const, publicKey, value: etc.bytesToHex(signature) } }
+    await expect(admitPack(signed)).resolves.toMatchObject({ signatureValid: true, signerKnown: false, signerTrusted: false, state: 'VALID_UNTRUSTED' })
+    await expect(admitPack(signed, [{ ...signed.signer, trustState: 'trusted' }])).resolves.toMatchObject({ signatureValid: true, signerKnown: true, signerTrusted: true, state: 'TRUSTED' })
+  })
+
+  it('rejects unbounded graph cycles and unsupported conditions', () => {
+    const base = scenarios[0]
+    const invalid = { ...base, nodes: [{ id: 'start', type: 'CHOICE' as const, branches: [{ next: 'start', when: { kind: 'not-a-condition' } }] }] } as unknown as typeof base
+    const issues = validatePack({ ...packFromScenarios([invalid]), schemaVersion: 2 })
+    expect(issues.some((issue) => issue.message.includes('Unsupported condition'))).toBe(true)
+    expect(issues.some((issue) => issue.message.includes('terminal'))).toBe(true)
+    expect(issues.some((issue) => issue.message.includes('Cycles require'))).toBe(true)
   })
 })

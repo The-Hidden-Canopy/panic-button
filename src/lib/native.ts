@@ -94,6 +94,52 @@ export const nativeTrustedSigners = async (): Promise<unknown[]> => {
   }
 }
 
+export const nativePackStage = async (record: { pack: unknown; digest: string; admission: unknown; state: string; stagedAt: number }): Promise<boolean> => {
+  if (!isTauriRuntime()) return false
+  try {
+    const { invoke } = await import('@tauri-apps/api/core')
+    const pack = record.pack as { id: string; version: string }
+    await invoke('pack_stage', { packId: pack.id, version: pack.version, digest: record.digest, packJson: JSON.stringify(record.pack), admissionJson: JSON.stringify(record.admission), installState: record.state, stagedAt: record.stagedAt })
+    return true
+  } catch {
+    return false
+  }
+}
+
+export const nativePackInstall = async (packId: string, version: string): Promise<boolean> => {
+  if (!isTauriRuntime()) return false
+  try {
+    const { invoke } = await import('@tauri-apps/api/core')
+    await invoke('pack_install', { packId, version, installedAt: Date.now() })
+    return true
+  } catch {
+    return false
+  }
+}
+
+export const nativePackList = async (): Promise<unknown[]> => {
+  if (!isTauriRuntime()) return []
+  try {
+    const { invoke } = await import('@tauri-apps/api/core')
+    const rows = await invoke<string[]>('pack_list')
+    return rows.map((row) => JSON.parse(row) as unknown)
+  } catch {
+    return []
+  }
+}
+
+export const nativeDraftSave = async (scenario: unknown): Promise<boolean> => {
+  if (!isTauriRuntime()) return false
+  try {
+    const { invoke } = await import('@tauri-apps/api/core')
+    const item = scenario as { id: string }
+    await invoke('draft_save', { scenarioId: item.id, scenarioJson: JSON.stringify(scenario), updatedAt: Date.now() })
+    return true
+  } catch {
+    return false
+  }
+}
+
 export const nativeProjectionSet = async (projection: unknown): Promise<boolean> => {
   if (!isTauriRuntime()) return false
   try {
