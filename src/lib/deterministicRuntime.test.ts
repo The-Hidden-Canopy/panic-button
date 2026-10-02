@@ -79,4 +79,18 @@ describe('deterministic incident runtime', () => {
     expect(verifyIncidentPackage(pack)).toMatchObject({ valid: true, corrupt: false, replayable: true })
     expect(verifyIncidentPackage({ ...pack, hashes: { ...pack.hashes, journal: 'tampered' } })).toMatchObject({ valid: false, corrupt: true })
   })
+
+  it('executes data-only alert, resource, and objective graph nodes', () => {
+    const base = scenarios[0]
+    const scenario = { ...base, id: 'graph-node-fixture', durationSeconds: 15, phases: [{ ...base.phases[0], durationSeconds: 15 }], nodes: [
+      { id: 'alert', type: 'ALERT' as const, durationMs: 1_000, alert: 'FIXTURE ALERT', next: ['resource'] },
+      { id: 'resource', type: 'RESOURCE_MUTATION' as const, durationMs: 1_000, resourceId: 'r1', delta: 1, next: ['objective'] },
+      { id: 'objective', type: 'OBJECTIVE' as const, durationMs: 0, next: ['terminal'] },
+      { id: 'terminal', type: 'TERMINAL' as const },
+    ] }
+    const runtime = advanceIncidentRuntime(openIncidentRuntime(scenario, 'seed-nodes'), scenario, 3_000, 0)
+    expect(runtime.journal.some((event) => event.type === 'AlertRaised' && event.payload.text === 'FIXTURE ALERT')).toBe(true)
+    expect(runtime.journal.some((event) => event.type === 'ResourceAdjusted' && event.payload.reason === 'node:resource')).toBe(true)
+    expect(runtime.journal.some((event) => event.type === 'ObjectiveSatisfied' && event.payload.objectiveId === 'objective')).toBe(true)
+  })
 })

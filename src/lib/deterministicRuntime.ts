@@ -205,6 +205,7 @@ const initialState = (scenario: Scenario, seed: string, incidentId: string): Inc
   seed,
   lifecycle: 'IDLE',
   simulationTimeMs: 0,
+  nodeEnteredAtMs: 0,
   phaseIndex: 0,
   currentNodeId: undefined,
   phases: scenario.phases.map((phase) => phase.id),
@@ -241,7 +242,8 @@ export const reduceIncidentState = (previous: IncidentRuntimeState, event: Incid
   switch (event.type) {
     case 'IncidentOpened': state.lifecycle = 'ARMING'; break
     case 'ScenarioBound': state.scenarioId = String(payload.scenarioId ?? state.scenarioId); state.scenarioVersion = String(payload.scenarioVersion ?? state.scenarioVersion); state.scenarioDigest = String(payload.scenarioDigest ?? state.scenarioDigest); state.seed = String(payload.seed ?? state.seed); break
-    case 'PhaseEntered': state.lifecycle = 'ACTIVE'; state.phaseIndex = Number(payload.phaseIndex ?? state.phaseIndex); state.currentNodeId = typeof payload.nodeId === 'string' ? payload.nodeId : state.phases[state.phaseIndex]; state.visitCounts[state.currentNodeId ?? ''] = (state.visitCounts[state.currentNodeId ?? ''] ?? 0) + 1; break
+    case 'GraphNodeEntered': state.lifecycle = 'ACTIVE'; state.currentNodeId = typeof payload.nodeId === 'string' ? payload.nodeId : state.currentNodeId; state.nodeEnteredAtMs = event.simulationTimeMs; state.visitCounts[state.currentNodeId ?? ''] = (state.visitCounts[state.currentNodeId ?? ''] ?? 0) + 1; break
+    case 'PhaseEntered': state.lifecycle = 'ACTIVE'; state.phaseIndex = Number(payload.phaseIndex ?? state.phaseIndex); state.currentNodeId = typeof payload.nodeId === 'string' ? payload.nodeId : state.phases[state.phaseIndex]; state.nodeEnteredAtMs = event.simulationTimeMs; state.visitCounts[state.currentNodeId ?? ''] = (state.visitCounts[state.currentNodeId ?? ''] ?? 0) + 1; break
     case 'AlertRaised': state.alerts.push(String(payload.text ?? '')); break
     case 'ReportPublished': {
       const report = payload.report as SituationReport | undefined
@@ -265,10 +267,11 @@ export const reduceIncidentState = (previous: IncidentRuntimeState, event: Incid
     }
     case 'MarkerRemoved': { const marker = state.markers.find((item) => item.id === payload.markerId); if (marker) marker.visible = false; break }
     case 'OperatorActionCommitted': { const id = String(payload.actionId ?? ''); if (id && !state.actionsSeen.includes(id)) state.actionsSeen.push(id); break }
-    case 'ConsequenceScheduled': state.pendingConsequences.push({ id: String(payload.id), dueAtMs: Number(payload.dueAtMs), actionId: String(payload.actionId), resourceId: typeof payload.resourceId === 'string' ? payload.resourceId : undefined, delta: payload.delta === undefined ? undefined : Number(payload.delta) }); break
+    case 'ConsequenceScheduled': state.pendingConsequences.push({ id: String(payload.id), dueAtMs: Number(payload.dueAtMs), actionId: String(payload.actionId), resourceId: typeof payload.resourceId === 'string' ? payload.resourceId : undefined, delta: payload.delta === undefined ? undefined : Number(payload.delta), flag: typeof payload.flag === 'string' ? payload.flag : undefined, value: payload.value as boolean | string | number | undefined }); break
     case 'ConsequenceApplied': state.pendingConsequences = state.pendingConsequences.filter((item) => item.id !== payload.id); break
     case 'ObjectiveSatisfied': state.objectives[String(payload.objectiveId)] = true; break
     case 'BranchSelected': state.flags[`branch:${String(payload.nodeId)}`] = String(payload.nextNodeId); break
+    case 'FlagSet': state.flags[String(payload.flag)] = payload.value as boolean | string | number; break
     case 'IncidentResolved': state.lifecycle = 'RESOLVING'; break
     case 'IncidentAborted': state.lifecycle = 'ABORTED'; break
     case 'IncidentRecovered': state.lifecycle = 'RECOVERING'; break
@@ -292,7 +295,9 @@ export const openIncidentRuntime = (scenarioInput: Scenario, seed = createSeed(s
   let runtime: IncidentRuntime = { state: initialState(scenario, seed, incidentId), journal: [] }
   runtime = append(runtime, 'IncidentOpened', { scenarioId: scenario.id }, 0, wallTimeMs)
   runtime = append(runtime, 'ScenarioBound', { scenarioId: scenario.id, scenarioVersion: String(scenario.schemaVersion ?? 2), scenarioDigest: scenarioDigest(scenario), seed }, 0, wallTimeMs)
-  runtime = append(runtime, 'PhaseEntered', { phaseIndex: 0, nodeId: scenario.phases[0]?.id }, 0, wallTimeMs)
+  const firstNode = scenario.nodes?.[0]
+  if (firstNode?.type === 'PHASE' || !firstNode) runtime = append(runtime, 'PhaseEntered', { phaseIndex: 0, nodeId: scenario.phases[0]?.id }, 0, wallTimeMs)
+  else runtime = enterGraphNode(runtime, scenario, firstNode, 0, wallTimeMs)
   for (const resource of runtime.state.resources) runtime = append(runtime, 'ResourceAdjusted', { resourceId: resource.id, delta: 0, reason: 'initial-allocation' }, 0, wallTimeMs)
   for (const marker of scenario.markers) runtime = append(runtime, 'MarkerCreated', { marker: { ...marker, visible: true } }, 0, wallTimeMs)
   for (const reportId of scenario.phases[0]?.reportIds ?? []) { const report = scenario.reports.find((item) => item.id === reportId); if (report) runtime = append(runtime, 'ReportPublished', { report }, 0, wallTimeMs) }
@@ -300,39 +305,71 @@ export const openIncidentRuntime = (scenarioInput: Scenario, seed = createSeed(s
   return runtime
 }
 
-const phaseAt = (scenario: Scenario, simulationTimeMs: number) => {
-  let elapsed = 0
-  for (let index = 0; index < scenario.phases.length; index += 1) { elapsed += scenario.phases[index].durationSeconds * 1_000; if (simulationTimeMs < elapsed) return index }
-  return scenario.phases.length - 1
-}
-
-const chooseBranch = (runtime: IncidentRuntime, scenario: Scenario, node: ScenarioNode, simulationTimeMs: number) => {
+const chooseBranch = (runtime: IncidentRuntime, node: ScenarioNode) => {
+  const override = runtime.state.flags[`branch:${node.id}`]
+  if (typeof override === 'string' && (node.branches ?? []).some((branch) => branch.next === override)) return override
   const random = createSeededRandom(runtime.state.seed, `branch:${node.id}`)
   const conditional = (node.branches ?? []).filter((branch) => branch.when && conditionMatches(branch.when, runtime.state, random))
   if (conditional.length) return conditional[0].next
   const defaults = (node.branches ?? []).filter((branch) => !branch.when)
   if (defaults.length) return defaults[random.int(defaults.length)].next
-  return node.next?.[0]
+  const options = node.next ?? []
+  return options.length ? options[random.int(options.length)] : undefined
+}
+
+const enterGraphNode = (runtimeInput: IncidentRuntime, scenario: Scenario, node: ScenarioNode, simulationTimeMs: number, wallTimeMs: number): IncidentRuntime => {
+  let runtime = runtimeInput
+  if (node.type === 'PHASE') {
+    const phaseIndex = scenario.phases.findIndex((phase) => phase.id === node.id)
+    const phase = scenario.phases[phaseIndex]
+    runtime = append(runtime, 'PhaseEntered', { phaseIndex: phaseIndex < 0 ? runtime.state.phaseIndex : phaseIndex, nodeId: node.id }, simulationTimeMs, wallTimeMs)
+    if (phase) {
+      for (const alert of phase.alerts) runtime = append(runtime, 'AlertRaised', { text: alert }, simulationTimeMs, wallTimeMs)
+      for (const reportId of phase.reportIds) { const report = scenario.reports.find((item) => item.id === reportId); if (report) runtime = append(runtime, 'ReportPublished', { report }, simulationTimeMs, wallTimeMs) }
+    }
+    return runtime
+  }
+  runtime = append(runtime, 'GraphNodeEntered', { nodeId: node.id, nodeType: node.type }, simulationTimeMs, wallTimeMs)
+  switch (node.type) {
+    case 'ALERT': runtime = append(runtime, 'AlertRaised', { text: node.alert ?? node.label ?? node.id }, simulationTimeMs, wallTimeMs); break
+    case 'REPORT': { const report = scenario.reports.find((item) => item.id === node.reportId); if (report) runtime = append(runtime, 'ReportPublished', { report }, simulationTimeMs, wallTimeMs); break }
+    case 'RESOURCE_MUTATION': if (node.resourceId && node.delta !== undefined) runtime = append(runtime, 'ResourceAdjusted', { resourceId: node.resourceId, delta: node.delta, reason: `node:${node.id}` }, simulationTimeMs, wallTimeMs); break
+    case 'MARKER_MUTATION': {
+      const markerId = node.markerId ?? node.marker?.id
+      const existing = markerId ? runtime.state.markers.find((marker) => marker.id === markerId) : undefined
+      if (markerId && existing && node.marker) runtime = append(runtime, 'MarkerMoved', { markerId, x: node.marker.x ?? existing.x, y: node.marker.y ?? existing.y }, simulationTimeMs, wallTimeMs)
+      else if (node.marker?.id) runtime = append(runtime, 'MarkerCreated', { marker: { id: node.marker.id, label: node.marker.label ?? node.marker.id, x: node.marker.x ?? 50, y: node.marker.y ?? 50, tone: node.marker.tone ?? 'neutral', visible: true } }, simulationTimeMs, wallTimeMs)
+      break
+    }
+    case 'OBJECTIVE': runtime = append(runtime, 'ObjectiveSatisfied', { objectiveId: node.id }, simulationTimeMs, wallTimeMs); break
+    default: break
+  }
+  return runtime
 }
 
 export const advanceIncidentRuntime = (runtimeInput: IncidentRuntime, scenarioInput: Scenario, simulationTimeMs: number, wallTimeMs = Date.now()): IncidentRuntime => {
   let runtime = runtimeInput
   const scenario = migrateScenarioToV2(scenarioInput)
   const target = Math.max(runtime.state.simulationTimeMs, Math.min(safeDurationMs(scenario), Math.floor(simulationTimeMs)))
-  const fromPhase = runtime.state.phaseIndex
-  const targetPhase = phaseAt(scenario, target)
-  for (let phaseIndex = fromPhase + 1; phaseIndex <= targetPhase; phaseIndex += 1) {
-    const phase = scenario.phases[phaseIndex]
-    if (!phase) continue
-    const node = scenario.nodes?.find((item) => item.id === phase.id)
-    runtime = append(runtime, 'PhaseEntered', { phaseIndex, nodeId: phase.id }, target, wallTimeMs)
-    for (const alert of phase.alerts) runtime = append(runtime, 'AlertRaised', { text: alert }, target, wallTimeMs)
-    for (const reportId of phase.reportIds) { const report = scenario.reports.find((item) => item.id === reportId); if (report) runtime = append(runtime, 'ReportPublished', { report }, target, wallTimeMs) }
-    if (node?.type === 'CHOICE') { const nextNodeId = chooseBranch(runtime, scenario, node, target); if (nextNodeId) runtime = append(runtime, 'BranchSelected', { nodeId: node.id, nextNodeId }, target, wallTimeMs) }
+  const nodes = scenario.nodes ?? []
+  let graphSteps = 0
+  while (nodes.length > 0 && graphSteps < 256) {
+    const current = nodes.find((node) => node.id === runtime.state.currentNodeId)
+    if (!current || current.type === 'TERMINAL') break
+    const dueAt = runtime.state.nodeEnteredAtMs + (current.durationMs ?? 0)
+    if (target < dueAt) break
+    const nextNodeId = current.type === 'CHOICE' || current.type === 'CONDITION' || current.type === 'RANDOM_CHOICE' ? chooseBranch(runtime, current) : current.next?.[0]
+    if (!nextNodeId) break
+    if (current.type === 'CHOICE' || current.type === 'CONDITION' || current.type === 'RANDOM_CHOICE') runtime = append(runtime, 'BranchSelected', { nodeId: current.id, nextNodeId }, dueAt, wallTimeMs)
+    const nextNode = nodes.find((node) => node.id === nextNodeId)
+    if (!nextNode) break
+    runtime = enterGraphNode(runtime, scenario, nextNode, dueAt, wallTimeMs)
+    graphSteps += 1
   }
   for (const consequence of [...runtime.state.pendingConsequences].filter((item) => item.dueAtMs <= target)) {
     runtime = append(runtime, 'ConsequenceApplied', { id: consequence.id, actionId: consequence.actionId }, target, wallTimeMs)
     if (consequence.resourceId && consequence.delta !== undefined) runtime = append(runtime, 'ResourceAdjusted', { resourceId: consequence.resourceId, delta: consequence.delta, reason: `consequence:${consequence.actionId}` }, target, wallTimeMs)
+    if (consequence.flag && consequence.value !== undefined) runtime = append(runtime, 'FlagSet', { flag: consequence.flag, value: consequence.value }, target, wallTimeMs)
   }
   runtime = append(runtime, 'CountdownUpdated', { remainingMs: Math.max(0, safeDurationMs(scenario) - target) }, target, wallTimeMs)
   if (target >= safeDurationMs(scenario) && runtime.state.lifecycle !== 'SUMMARY' && runtime.state.lifecycle !== 'ABORTED') {
@@ -356,7 +393,8 @@ export const dispatchIncidentAction = (runtimeInput: IncidentRuntime, scenarioIn
   }
   if (action.kind === 'PIN_MARKER' && (input.markerId ?? action.markerId)) runtime = append(runtime, 'MarkerMoved', { markerId: input.markerId ?? action.markerId, x: 50, y: 50 }, simulationTimeMs, wallTimeMs)
   if (action.targetNodeId) runtime = append(runtime, 'BranchSelected', { nodeId: runtime.state.currentNodeId ?? 'operator', nextNodeId: action.targetNodeId }, simulationTimeMs, wallTimeMs)
-  if (action.amount && action.resourceId && action.kind !== 'DEPLOY_RESOURCE') runtime = append(runtime, 'ConsequenceScheduled', { id: `consequence-${action.id}-${runtime.journal.length}`, actionId: action.id, dueAtMs: simulationTimeMs + 2_000, resourceId: action.resourceId, delta: action.amount }, simulationTimeMs, wallTimeMs)
+  if (action.consequence && runtime.state.pendingConsequences.length < (scenario.maxScheduledEvents ?? 512)) runtime = append(runtime, 'ConsequenceScheduled', { id: `consequence-${action.id}-${runtime.journal.length}`, actionId: action.id, dueAtMs: simulationTimeMs + action.consequence.delayMs, resourceId: action.consequence.resourceId, delta: action.consequence.delta, flag: action.consequence.flag, value: action.consequence.value }, simulationTimeMs, wallTimeMs)
+  else if (action.amount && action.resourceId && action.kind !== 'DEPLOY_RESOURCE' && runtime.state.pendingConsequences.length < (scenario.maxScheduledEvents ?? 512)) runtime = append(runtime, 'ConsequenceScheduled', { id: `consequence-${action.id}-${runtime.journal.length}`, actionId: action.id, dueAtMs: simulationTimeMs + 2_000, resourceId: action.resourceId, delta: action.amount }, simulationTimeMs, wallTimeMs)
   return runtime
 }
 
@@ -373,7 +411,7 @@ export const recoverIncidentRuntime = (runtime: IncidentRuntime, wallTimeMs = Da
 const eventToTimeline = (event: IncidentEvent): TimelineEvent => {
   const seconds = Math.floor(event.simulationTimeMs / 1_000)
   const time = `${Math.floor(seconds / 60).toString().padStart(2, '0')}:${(seconds % 60).toString().padStart(2, '0')}`
-  const labels: Record<IncidentEventType, string> = { IncidentOpened: 'INCIDENT OPENED', ScenarioBound: 'SCENARIO BOUND', PhaseEntered: 'PHASE ENTERED', AlertRaised: 'ALERT RAISED', ReportPublished: 'SITUATION REPORT', ResourceAdjusted: 'RESOURCE UPDATE', MarkerCreated: 'MARKER CREATED', MarkerMoved: 'MARKER MOVED', MarkerRemoved: 'MARKER REMOVED', OperatorActionProposed: 'ACTION PROPOSED', OperatorActionCommitted: 'ACTION COMMITTED', ConsequenceScheduled: 'CONSEQUENCE SCHEDULED', ConsequenceApplied: 'CONSEQUENCE APPLIED', ObjectiveSatisfied: 'OBJECTIVE SATISFIED', BranchSelected: 'BRANCH SELECTED', CountdownUpdated: 'COUNTDOWN', IncidentResolved: 'INCIDENT RESOLVED', IncidentAborted: 'INCIDENT ABORTED', IncidentRecovered: 'RECOVERY MARKER', SummaryPublished: 'SUMMARY PUBLISHED' }
+  const labels: Record<IncidentEventType, string> = { IncidentOpened: 'INCIDENT OPENED', ScenarioBound: 'SCENARIO BOUND', GraphNodeEntered: 'GRAPH NODE ENTERED', PhaseEntered: 'PHASE ENTERED', AlertRaised: 'ALERT RAISED', ReportPublished: 'SITUATION REPORT', ResourceAdjusted: 'RESOURCE UPDATE', MarkerCreated: 'MARKER CREATED', MarkerMoved: 'MARKER MOVED', MarkerRemoved: 'MARKER REMOVED', OperatorActionProposed: 'ACTION PROPOSED', OperatorActionCommitted: 'ACTION COMMITTED', ConsequenceScheduled: 'CONSEQUENCE SCHEDULED', ConsequenceApplied: 'CONSEQUENCE APPLIED', ObjectiveSatisfied: 'OBJECTIVE SATISFIED', BranchSelected: 'BRANCH SELECTED', FlagSet: 'FLAG SET', CountdownUpdated: 'COUNTDOWN', IncidentResolved: 'INCIDENT RESOLVED', IncidentAborted: 'INCIDENT ABORTED', IncidentRecovered: 'RECOVERY MARKER', SummaryPublished: 'SUMMARY PUBLISHED' }
   const tone: TimelineEvent['tone'] = event.type.includes('Aborted') || event.type.includes('Alert') ? 'alert' : event.type.includes('Resolved') || event.type.includes('Summary') ? 'success' : 'info'
   return { id: `${event.sequence}-${event.eventDigest}`, time, label: labels[event.type], detail: String(event.payload.text ?? event.payload.reason ?? event.payload.actionId ?? event.payload.nodeId ?? event.type), tone }
 }

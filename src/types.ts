@@ -249,6 +249,7 @@ export type IncidentLifecycle = 'IDLE' | 'ARMING' | 'ACTIVE' | 'RESOLVING' | 'SU
 export type IncidentEventType =
   | 'IncidentOpened'
   | 'ScenarioBound'
+  | 'GraphNodeEntered'
   | 'PhaseEntered'
   | 'AlertRaised'
   | 'ReportPublished'
@@ -262,6 +263,7 @@ export type IncidentEventType =
   | 'ConsequenceApplied'
   | 'ObjectiveSatisfied'
   | 'BranchSelected'
+  | 'FlagSet'
   | 'CountdownUpdated'
   | 'IncidentResolved'
   | 'IncidentAborted'
@@ -291,6 +293,7 @@ export type IncidentRuntimeState = {
   seed: string
   lifecycle: IncidentLifecycle
   simulationTimeMs: number
+  nodeEnteredAtMs: number
   phaseIndex: number
   currentNodeId?: string
   phases: string[]
@@ -301,7 +304,7 @@ export type IncidentRuntimeState = {
   objectives: Record<string, boolean>
   flags: Record<string, boolean | string | number>
   actionsSeen: string[]
-  pendingConsequences: Array<{ id: string; dueAtMs: number; actionId: string; delta?: number; resourceId?: string }>
+  pendingConsequences: Array<{ id: string; dueAtMs: number; actionId: string; delta?: number; resourceId?: string; flag?: string; value?: boolean | string | number }>
   visitCounts: Record<string, number>
   contradictionCount: number
 }

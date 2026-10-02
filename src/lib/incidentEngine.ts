@@ -41,7 +41,11 @@ export const scaleScenarioDuration = (scenario: Scenario, durationSeconds: numbe
     allocated += scaled
     return { ...phase, durationSeconds: scaled }
   })
-  return { ...scenario, durationSeconds: safeDuration, phases }
+  const nodes = scenario.nodes?.map((node) => {
+    const phaseIndex = phases.findIndex((phase) => phase.id === node.id)
+    return phaseIndex >= 0 ? { ...node, durationMs: phases[phaseIndex].durationSeconds * 1_000 } : node
+  })
+  return { ...scenario, durationSeconds: safeDuration, phases, nodes }
 }
 
 export const phaseStart = (scenario: Scenario, phaseIndex: number) => scenario.phases.slice(0, phaseIndex).reduce((sum, phase) => sum + phase.durationSeconds, 0)
