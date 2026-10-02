@@ -3,10 +3,12 @@ import type {
   IncidentActionInput,
   IncidentEvent,
   IncidentEventType,
+  IncidentPackage,
   IncidentReplayInput,
   IncidentRuntime,
   IncidentRuntimeState,
   IncidentSummary,
+  ReplayVerification,
   MapMarker,
   RuntimeMarker,
   Scenario,
@@ -395,6 +397,14 @@ export const projectActiveIncident = (runtime: IncidentRuntime, scenario: Scenar
 
 export const runtimeStateDigest = (state: IncidentRuntimeState) => deterministicDigest(state)
 
+export const reconstructRuntime = (scenarioInput: Scenario, seed: string, journal: IncidentEvent[]): IncidentRuntime => {
+  const scenario = migrateScenarioToV2(scenarioInput)
+  const incidentId = journal[0]?.incidentId ?? `incident-${deterministicDigest(`${scenario.id}:${seed}`)}`
+  let state = initialState(scenario, seed, incidentId)
+  for (const event of journal) state = reduceIncidentState(state, event)
+  return { state, journal: [...journal] }
+}
+
 export const deriveIncidentSummary = (runtime: IncidentRuntime, exitReason: IncidentSummary['exitReason']): IncidentSummary => ({
   incidentId: runtime.state.incidentId,
   exitReason,
@@ -431,5 +441,33 @@ export const verifyReplay = (scenario: Scenario, input: IncidentReplayInput) => 
 export const replayInputFor = (scenario: Scenario, seed: string, settingsProjection: IncidentReplayInput['settingsProjection'], actions: IncidentReplayInput['actions'] = []): IncidentReplayInput => ({ packDigest: scenarioDigest(scenario), scenarioId: scenario.id, scenarioVersion: String(scenario.schemaVersion ?? 2), seed, actions, settingsProjection })
 
 export const isRuntimeCorrupt = (runtime: IncidentRuntime) => runtime.journal.some((event, index) => event.sequence !== index + 1 || event.previousDigest !== (index ? runtime.journal[index - 1].eventDigest : 'GENESIS') || event.eventDigest !== deterministicDigest({ sequence: event.sequence, incidentId: event.incidentId, simulationTimeMs: event.simulationTimeMs, wallTimeMs: event.wallTimeMs, type: event.type, payload: event.payload, previousDigest: event.previousDigest }))
+
+export const createIncidentPackage = (incident: ActiveIncident, signerState: IncidentPackage['manifest']['signerState'] = 'LOCAL_UNSIGNED', appBuildId = '0.3.0'): IncidentPackage => {
+  const scenario = migrateScenarioToV2(incident.scenario)
+  const journal = incident.journal ?? []
+  const runtime = incident.runtimeState ? { state: incident.runtimeState, journal } : reconstructRuntime(scenario, incident.seed ?? createSeed(scenario.id, incident.startedAt), journal)
+  const summary = incident.summary ?? deriveIncidentSummary(runtime, incident.exitReason === 'ERROR' ? 'ERROR' : incident.exitReason ?? 'RESOLVED')
+  const replayInput = incident.replayInput ?? replayInputFor(scenario, runtime.state.seed, { durationSeconds: scenario.durationSeconds, reducedMotion: false, soundEnabled: false })
+  const manifest: IncidentPackage['manifest'] = { formatVersion: 1, appBuildId, incidentId: runtime.state.incidentId, scenarioId: scenario.id, scenarioDigest: scenarioDigest(scenario), completionStatus: summary.exitReason, signerState, externalAssetsPresent: false, journalDigest: summary.journalDigest, finalStateDigest: summary.finalStateDigest }
+  const hashes = { manifest: deterministicDigest(manifest), scenarioSnapshot: deterministicDigest(scenario), journal: deterministicDigest(journal), summary: deterministicDigest(summary), replayInput: deterministicDigest(replayInput) }
+  return { manifest, scenarioSnapshot: scenario, journal, summary, replayInput, hashes }
+}
+
+export const verifyIncidentPackage = (pack: IncidentPackage): ReplayVerification => {
+  try {
+    if (pack.manifest.formatVersion !== 1) return { valid: false, corrupt: true, replayable: false, message: 'Unsupported incident package format.' }
+    const expectedHashes = { manifest: deterministicDigest(pack.manifest), scenarioSnapshot: deterministicDigest(pack.scenarioSnapshot), journal: deterministicDigest(pack.journal), summary: deterministicDigest(pack.summary), replayInput: deterministicDigest(pack.replayInput) }
+    if (Object.entries(expectedHashes).some(([key, value]) => pack.hashes[key] !== value)) return { valid: false, corrupt: true, replayable: false, message: 'Incident package hash mismatch.' }
+    const runtime = reconstructRuntime(pack.scenarioSnapshot, pack.replayInput.seed, pack.journal)
+    if (isRuntimeCorrupt(runtime)) return { valid: false, corrupt: true, replayable: false, message: 'Incident journal digest chain is corrupt.' }
+    if (scenarioDigest(pack.scenarioSnapshot) !== pack.manifest.scenarioDigest || pack.replayInput.packDigest !== pack.manifest.scenarioDigest || pack.replayInput.scenarioId !== pack.manifest.scenarioId) return { valid: false, corrupt: true, replayable: false, message: 'Incident package scenario binding does not match the snapshot.' }
+    const replay = verifyReplay(pack.scenarioSnapshot, pack.replayInput)
+    if (!replay.identical) return { valid: false, corrupt: false, replayable: false, message: 'Replay did not produce identical journal/state output.' }
+    if (replay.finalStateDigest !== pack.manifest.finalStateDigest) return { valid: false, corrupt: false, replayable: false, message: 'Replay final state does not match the recorded summary.', journalDigest: replay.journalDigest, finalStateDigest: replay.finalStateDigest }
+    return { valid: true, corrupt: false, replayable: true, journalDigest: replay.journalDigest, finalStateDigest: replay.finalStateDigest }
+  } catch (error) {
+    return { valid: false, corrupt: true, replayable: false, message: error instanceof Error ? error.message : 'Incident package verification failed.' }
+  }
+}
 
 export const markerProjection = (markers: MapMarker[]) => markers.map((marker) => ({ ...marker, visible: true }))

@@ -3,6 +3,7 @@ import { scenarios } from '../data/scenarios'
 import {
   abortIncidentRuntime,
   advanceIncidentRuntime,
+  createIncidentPackage,
   createSeed,
   dispatchIncidentAction,
   isRuntimeCorrupt,
@@ -10,6 +11,8 @@ import {
   openIncidentRuntime,
   replayInputFor,
   replayRuntime,
+  projectActiveIncident,
+  verifyIncidentPackage,
   validateScenarioGraph,
   verifyReplay,
 } from './deterministicRuntime'
@@ -66,5 +69,14 @@ describe('deterministic incident runtime', () => {
     const withAction = dispatchIncidentAction(runtime, scenario, { actionId: 'hold-line', kind: 'SELECT_RESPONSE' }, 1_000)
     const resolved = advanceIncidentRuntime(withAction, scenario, scenario.durationSeconds * 1_000)
     expect(resolved.journal.some((event) => event.type === 'BranchSelected' && event.payload.nextNodeId === 'stabilized')).toBe(true)
+  })
+
+  it('exports a self-contained incident package that can be verified and reconstructed', () => {
+    const scenario = migrateScenarioToV2(scenarios[0])
+    const runtime = advanceIncidentRuntime(openIncidentRuntime(scenario, 'seed-package'), scenario, scenario.durationSeconds * 1000, 0)
+    const incident = projectActiveIncident(runtime, scenario, 0)
+    const pack = createIncidentPackage(incident)
+    expect(verifyIncidentPackage(pack)).toMatchObject({ valid: true, corrupt: false, replayable: true })
+    expect(verifyIncidentPackage({ ...pack, hashes: { ...pack.hashes, journal: 'tampered' } })).toMatchObject({ valid: false, corrupt: true })
   })
 })

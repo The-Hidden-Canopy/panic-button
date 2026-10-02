@@ -319,3 +319,32 @@ export type IncidentSummary = {
   journalDigest: string
   finalStateDigest: string
 }
+
+export type IncidentPackage = {
+  manifest: {
+    formatVersion: 1
+    appBuildId: string
+    incidentId: string
+    scenarioId: string
+    scenarioDigest: string
+    completionStatus: IncidentSummary['exitReason']
+    signerState: PackTrustState
+    externalAssetsPresent: boolean
+    journalDigest: string
+    finalStateDigest: string
+  }
+  scenarioSnapshot: Scenario
+  journal: IncidentEvent[]
+  summary: IncidentSummary
+  replayInput: IncidentReplayInput
+  hashes: Record<string, string>
+}
+
+export type ReplayVerification = {
+  valid: boolean
+  corrupt: boolean
+  replayable: boolean
+  message?: string
+  journalDigest?: string
+  finalStateDigest?: string
+}

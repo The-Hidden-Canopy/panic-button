@@ -1,4 +1,4 @@
-import type { PackRecord, ReplayRecord, Scenario, ScenarioPack, Settings } from '../types'
+import type { IncidentPackage, PackRecord, ReplayRecord, Scenario, ScenarioPack, Settings } from '../types'
 import { nativeDraftSave, nativePackInstall, nativePackStage, nativeStorageDelete, nativeStorageGet, nativeStorageSet } from './native'
 import { deterministicDigest } from './deterministicRuntime'
 
@@ -129,7 +129,7 @@ export const hydrateNativeValue = async (key: string): Promise<unknown | undefin
   return encoded ? decodeStored<unknown>(encoded) : undefined
 }
 
-export const downloadJson = (filename: string, value: ScenarioPack | ReplayRecord) => {
+export const downloadJson = (filename: string, value: ScenarioPack | ReplayRecord | IncidentPackage) => {
   const blob = new Blob([JSON.stringify(value, null, 2)], { type: 'application/json' })
   const url = URL.createObjectURL(blob)
   const anchor = document.createElement('a')
