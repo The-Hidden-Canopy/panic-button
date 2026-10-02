@@ -1,4 +1,4 @@
-import type { Scenario } from '../types'
+import type { Scenario, ScenarioNode } from '../types'
 
 const makeScenario = (config: Pick<Scenario, 'id' | 'title' | 'premise' | 'severity' | 'accents'>, subject: string, resolution: string): Scenario => ({
   ...config,
@@ -37,7 +37,7 @@ const additionalScenarios: Scenario[] = [
   makeScenario({ id: 'meeting-could-email', title: 'MEETING COULD BE AN EMAIL', premise: 'A calendar invitation has achieved a level of unnecessary complexity.', severity: 'CATASTROPHIC', accents: ['#a687ff', '#ff3d5a'] }, 'calendar incident', 'The meeting ended. An email was sent anyway.'),
 ]
 
-export const scenarios: Scenario[] = [
+const baseScenarios: Scenario[] = [
   {
     id: 'pizza-14-minutes-late',
     title: 'PIZZA 14 MINUTES LATE',
@@ -100,3 +100,21 @@ export const scenarios: Scenario[] = [
   },
   ...additionalScenarios,
 ]
+
+const withBranching = (scenario: Scenario, actionId: string, actionLabel: string, resourceId: string, resourceDelta: number): Scenario => {
+  const nodes: ScenarioNode[] = scenario.phases.map((phase, index) => ({ id: phase.id, type: index === scenario.phases.length - 1 ? 'CHOICE' : 'PHASE', label: phase.label, objective: phase.objective, durationMs: phase.durationSeconds * 1000, next: [index === scenario.phases.length - 1 ? 'stabilized' : scenario.phases[index + 1].id], ...(index === scenario.phases.length - 1 ? { branches: [{ when: { kind: 'action_seen', actionId }, next: 'stabilized' }, { next: 'fallback' }] } : {}) }))
+  return {
+    ...scenario,
+    schemaVersion: 2,
+    seedPolicy: 'deterministic',
+    nodes: [...nodes, { id: 'stabilized', type: 'TERMINAL' as const, label: 'STABILIZED' }, { id: 'fallback', type: 'TERMINAL' as const, label: 'STABILIZED WITH QUESTIONS' }],
+    actions: [{ id: actionId, label: actionLabel, kind: 'SELECT_RESPONSE' as const, resourceId, amount: resourceDelta, targetNodeId: 'stabilized' }],
+  }
+}
+
+export const scenarios: Scenario[] = baseScenarios.map((scenario) => {
+  if (scenario.id === 'pizza-14-minutes-late') return withBranching(scenario, 'hold-line', 'Hold the porch line', 'r4', 5)
+  if (scenario.id === 'coffee-machine-refusal') return withBranching(scenario, 'authorize-tea', 'Authorize backup tea', 'r2', -1)
+  if (scenario.id === 'dog-wall-suspicion') return withBranching(scenario, 'pin-wall', 'Pin suspicious wall', 'r1', 1)
+  return { ...scenario, schemaVersion: 2, seedPolicy: 'deterministic' }
+})

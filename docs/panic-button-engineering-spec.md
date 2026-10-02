@@ -15,12 +15,12 @@ Panic Button is a standalone Windows desktop party app, not a host plugin. Its e
 - Generic HID support through keyboard-emulation buttons.
 - Ten built-in scenarios plus a form-driven local scenario editor.
 - Validated JSON scenario-pack import/export with data-only safety boundaries.
-- Local replay persistence and replay JSON export.
+- Journal-first deterministic incident runtime with replay input and digest verification.
 - Versioned, checksummed local persistence with backup fallback and interrupted-run recovery markers.
 - Hotkey debounce and configurable post-incident cooldown.
 - Pack-size, duplicate-id, SHA-256 manifest, and unsafe-path checks.
 - Optional Ed25519 pack signature verification and minimum-app-version compatibility checks.
-- Native SQLite persistence with browser-compatible fallback.
+- Native SQLite persistence with incident/event/trusted-signer tables and browser-compatible fallback.
 - Optional secondary-display surveillance mirrors labeled as simulated.
 - Synthetic maps, fake satellite layers, situation reports, resources, timelines, and alert audio.
 - No accounts, telemetry, cloud dependency, arbitrary commands, or runtime network assets.
@@ -28,11 +28,12 @@ Panic Button is a standalone Windows desktop party app, not a host plugin. Its e
 ## Runtime state machine
 
 ```text
-IDLE -> ARMING -> ACTIVE -> AUTO_DISMISS -> SUMMARY -> IDLE
-Any state -> EMERGENCY_EXIT -> RECOVERING -> IDLE
+IDLE -> ARMING -> ACTIVE -> RESOLVING -> SUMMARY -> IDLE
+Any state -> EMERGENCY_EXIT -> ABORTED -> IDLE
+Any interrupted active state -> RECOVERING -> ABORTED -> IDLE
 ```
 
-`IDLE` registers the trigger. `ARMING` selects and validates a scenario. `ACTIVE` runs timed phases and updates the dashboard. `AUTO_DISMISS` resolves the incident after its configured duration. `SUMMARY` presents absurd metrics and replay actions. `EMERGENCY_EXIT` stops sound and returns the user to a safe normal state.
+`IDLE` registers the trigger. `ARMING` selects and validates a scenario. `ACTIVE` advances a virtual monotonic simulation clock and reduces a journal of validated events. `RESOLVING` records the final transition, and `SUMMARY` presents derived metrics and replay actions. `EMERGENCY_EXIT` appends an abort event, stops sound, closes mirrors, and returns the user to a safe normal state. `Esc` is unconditional.
 
 The initial duration is 90 seconds and is configurable between 15 and 300 seconds.
 
@@ -48,13 +49,16 @@ The initial duration is 90 seconds and is configurable between 15 and 300 second
 
 - `src/App.tsx`: command center, timeline, situation reports, scenario lab, and settings.
 - `src/data/scenarios.ts`: built-in incident content.
-- `src/lib/incidentEngine.ts`: incident creation, phase selection, timing, and event formatting.
+- `src/lib/incidentEngine.ts`: compatibility helpers for the dashboard projection.
+- `src/lib/deterministicRuntime.ts`: pure reducer, journal, virtual clock, named seeded PRNG streams, bounded actions, graph migration, recovery, and replay verification.
 - `src/lib/native.ts`: Tauri shortcut registration with browser fallback.
 - `src/styles.css`: retro disaster-broadcast visual system.
 
 ## Scenario contract
 
 Scenarios are data-only. The pack validator rejects executable code, shell commands, external URLs, unsafe filesystem paths, oversized assets, invalid durations, missing resolution content, broken report references, and out-of-range map markers before activation.
+
+Scenario packs are schema version 2 at the runtime boundary. Legacy phase lists migrate into bounded `PHASE` nodes ending at a `TERMINAL`; built-in packs include data-only `CHOICE` nodes and closed action kinds. The graph validator rejects dangling edges, unreachable nodes, missing terminals, oversized graphs, unbounded action amounts, and unsupported fields. Pack signature validity is separate from signer trust: an otherwise valid signature is not automatically trusted.
 
 ```ts
 type ScenarioPack = {
@@ -134,7 +138,7 @@ runtime-error
 
 ## Storage and update boundary
 
-The current persistence model is versioned and checksummed local settings, local scenario drafts, replay records, and active-run recovery markers. Packaged Tauri builds mirror these values into SQLite using WAL mode; browser preview remains local-storage compatible. Signed packs are verified when signatures are present, while unsigned packs remain allowed for local authoring. Runtime remains offline.
+The browser preview keeps versioned/checksummed local settings and drafts for iteration. In packaged Tauri builds, the authoritative incident journal is appended to SQLite in WAL mode (`incidents` and `incident_events`), with `trusted_signers` storing explicit `trusted`, `local`, `blocked`, or `unknown` states. Signed packs are verified when signatures are present, but signature validity and trust are separate decisions. Runtime remains offline.
 
 ## Safety requirements
 
@@ -145,12 +149,15 @@ The current persistence model is versioned and checksummed local settings, local
 - Never fetch external map, audio, font, or image assets at runtime.
 - Always keep `Esc` available as a fast emergency exit.
 - If a run is interrupted, record it as aborted and start cleanly next time.
+- Replays are reconstructed from pack/scenario digest, seed, settings projection, and ordered actions; the final React snapshot is not the source of truth.
+- Corrupt journal chains are not auto-replayed; they remain exportable for recovery inspection.
 
 ## Acceptance criteria
 
 - A user can trigger the app from another foreground application.
 - The dashboard appears without changing the rest of Windows.
 - Built-in scenarios run offline and progress through multiple phases.
+- Ten built-in scenarios are upgraded to deterministic schema-v2 runtime records; three include meaningful data-only branches and closed operator actions.
 - Auto-dismiss and emergency exit work from every state.
 - The editor can modify, validate, preview, save, import, and export a scenario draft.
 - Ten built-in scenarios run offline and each has multiple timed phases, map markers, resources, reports, and a resolution.
@@ -159,7 +166,7 @@ The current persistence model is versioned and checksummed local settings, local
 - Repeated trigger presses are debounced and incidents observe a configurable cooldown.
 - Windows packaging produces an NSIS current-user installer artifact.
 - Signed packs are verified with Ed25519 metadata and incompatible minimum-app versions are rejected.
-- Secondary displays can show a separate full-screen simulated surveillance mirror.
+- Secondary displays show a full-screen simulated surveillance projection of the same native-persisted runtime state.
 - The browser preview and Tauri shell share the same incident behavior.
 - `npm test`, `npm run build`, `npm audit --audit-level=high`, `cargo check --manifest-path src-tauri/Cargo.toml`, and `npm run tauri:build` pass.
 - Malformed or unsafe scenario packs are rejected before activation.

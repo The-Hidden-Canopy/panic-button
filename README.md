@@ -18,20 +18,21 @@ The repository contains a working engineering build:
 - Automatic incident progression and stabilization.
 - Synthetic map and simulated satellite imagery labels.
 - Situation reports, resource allocation, timeline, and replay state.
+- Deterministic incident kernel with explicit lifecycle, virtual monotonic time, seeded random streams, journal-first events, bounded operator actions, and replay digest verification.
 - Scenario editor with validation, JSON preview, draft persistence, import, export, and preview activation.
 - Strict data-only scenario-pack validation with unsafe-field, path, asset, duration, and reference checks.
 - Versioned, checksummed local storage with backup fallback and interrupted-run recovery.
 - Hotkey debounce plus configurable post-incident cooldown.
 - Scenario-pack byte limits, duplicate-id checks, safe path checks, and SHA-256 manifest validation.
 - Optional Ed25519 pack signature verification and app-version compatibility checks.
-- Native Tauri SQLite key/value persistence with browser fallback.
+- Native Tauri SQLite persistence with incident/event/trusted-signer tables and browser fallback.
 - Optional full-screen simulated surveillance mirrors on secondary displays.
 - Local replay persistence and replay JSON export.
 - Local settings for sound, reduced motion, display behavior, and duration.
 - Ten built-in scenarios covering mundane household, office, delivery, and device incidents.
 - Automated Vitest coverage for the incident engine and pack validator.
 
-The current persistence boundary is versioned browser/Tauri local storage with checksums, backup fallback, and crash recovery markers, mirrored into a native SQLite store in packaged Tauri builds. Signed pack verification and secondary-display mirrors are supported; code signing and clean-machine acceptance remain external release gates.
+The browser preview uses versioned/checksummed local storage for compatibility. Packaged Tauri builds append the authoritative incident journal to native SQLite and persist explicit signer trust states. Signed pack verification and secondary-display mirrors are supported; code signing and clean-machine acceptance remain external release gates.
 
 This is deliberately theatrical: it does not lock the computer, disable Windows controls, execute scenario code, or make network requests at runtime.
 
@@ -71,7 +72,8 @@ npm run tauri:build
 src/
   App.tsx                 command center, timeline, reports, editor, settings
   data/scenarios.ts       built-in scenario pack
-  lib/incidentEngine.ts   incident state and timeline helpers
+  lib/incidentEngine.ts   compatibility helpers for the dashboard
+  lib/deterministicRuntime.ts journal-first reducer, clock, PRNG, graph, and replay
   lib/native.ts           Tauri/browser trigger boundary
   lib/storage.ts          versioned settings, drafts, replays, recovery markers
   lib/triggerGuard.ts     debounce and post-incident cooldown gate

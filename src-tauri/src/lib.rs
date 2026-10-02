@@ -34,10 +34,114 @@ fn storage_connection(app: &AppHandle) -> Result<Connection, String> {
                  key TEXT PRIMARY KEY NOT NULL,
                  value TEXT NOT NULL,
                  updated_at INTEGER NOT NULL
+             );
+             CREATE TABLE IF NOT EXISTS incidents (
+                 incident_id TEXT PRIMARY KEY NOT NULL,
+                 lifecycle TEXT NOT NULL,
+                 started_at INTEGER NOT NULL,
+                 updated_at INTEGER NOT NULL
+             );
+             CREATE TABLE IF NOT EXISTS incident_events (
+                 incident_id TEXT NOT NULL,
+                 sequence INTEGER NOT NULL,
+                 event_json TEXT NOT NULL,
+                 event_digest TEXT NOT NULL,
+                 created_at INTEGER NOT NULL,
+                 PRIMARY KEY (incident_id, sequence)
+             );
+             CREATE TABLE IF NOT EXISTS trusted_signers (
+                 fingerprint TEXT PRIMARY KEY NOT NULL,
+                 display_name TEXT NOT NULL,
+                 public_key TEXT NOT NULL,
+                 trust_state TEXT NOT NULL,
+                 updated_at INTEGER NOT NULL
              );",
         )
         .map_err(|error| error.to_string())?;
     Ok(connection)
+}
+
+#[tauri::command]
+fn incident_store_event(
+    app: AppHandle,
+    incident_id: String,
+    sequence: i64,
+    event_json: String,
+    event_digest: String,
+    lifecycle: String,
+    started_at: i64,
+) -> Result<(), String> {
+    let mut connection = storage_connection(&app)?;
+    let transaction = connection
+        .transaction()
+        .map_err(|error| error.to_string())?;
+    transaction
+        .execute(
+            "INSERT INTO incidents (incident_id, lifecycle, started_at, updated_at) VALUES (?1, ?2, ?3, unixepoch())
+             ON CONFLICT(incident_id) DO UPDATE SET lifecycle = excluded.lifecycle, updated_at = excluded.updated_at",
+            params![incident_id, lifecycle, started_at],
+        )
+        .map_err(|error| error.to_string())?;
+    transaction
+        .execute(
+            "INSERT OR IGNORE INTO incident_events (incident_id, sequence, event_json, event_digest, created_at) VALUES (?1, ?2, ?3, ?4, unixepoch())",
+            params![incident_id, sequence, event_json, event_digest],
+        )
+        .map_err(|error| error.to_string())?;
+    transaction.commit().map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn incident_load_events(app: AppHandle, incident_id: String) -> Result<Vec<String>, String> {
+    let connection = storage_connection(&app)?;
+    let mut statement = connection
+        .prepare(
+            "SELECT event_json FROM incident_events WHERE incident_id = ?1 ORDER BY sequence ASC",
+        )
+        .map_err(|error| error.to_string())?;
+    let rows = statement
+        .query_map(params![incident_id], |row| row.get::<_, String>(0))
+        .map_err(|error| error.to_string())?;
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn trust_signer(
+    app: AppHandle,
+    fingerprint: String,
+    display_name: String,
+    public_key: String,
+    trust_state: String,
+) -> Result<(), String> {
+    if !matches!(
+        trust_state.as_str(),
+        "trusted" | "local" | "blocked" | "unknown"
+    ) {
+        return Err("unsupported trust state".to_string());
+    }
+    let connection = storage_connection(&app)?;
+    connection
+        .execute(
+            "INSERT INTO trusted_signers (fingerprint, display_name, public_key, trust_state, updated_at) VALUES (?1, ?2, ?3, ?4, unixepoch())
+             ON CONFLICT(fingerprint) DO UPDATE SET display_name = excluded.display_name, public_key = excluded.public_key, trust_state = excluded.trust_state, updated_at = excluded.updated_at",
+            params![fingerprint, display_name, public_key, trust_state],
+        )
+        .map(|_| ())
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn trusted_signers(app: AppHandle) -> Result<Vec<String>, String> {
+    let connection = storage_connection(&app)?;
+    let mut statement = connection
+        .prepare("SELECT json_object('fingerprint', fingerprint, 'displayName', display_name, 'publicKey', public_key, 'trustState', trust_state) FROM trusted_signers ORDER BY display_name ASC")
+        .map_err(|error| error.to_string())?;
+    let rows = statement
+        .query_map([], |row| row.get::<_, String>(0))
+        .map_err(|error| error.to_string())?;
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -139,6 +243,10 @@ pub fn run() {
             storage_get,
             storage_set,
             storage_delete,
+            incident_store_event,
+            incident_load_events,
+            trust_signer,
+            trusted_signers,
             set_surveillance_windows
         ])
         .run(tauri::generate_context!())

@@ -1,5 +1,6 @@
 import { etc, verifyAsync } from '@noble/ed25519'
 import type { Scenario, ScenarioPack, ValidationIssue } from '../types'
+import { validateScenarioGraph } from './deterministicRuntime'
 
 const MIN_DURATION = 15
 const MAX_DURATION = 300
@@ -8,7 +9,7 @@ const MAX_ASSETS = 200
 export const MAX_PACK_BYTES = 2_000_000
 const forbiddenKeys = new Set(['script', 'command', 'exec', 'shell', 'url', 'filesystem', 'runtime'])
 const externalUrlPattern = /(?:https?|ftp|file|javascript):\/\//i
-export const SCENARIO_PACK_SCHEMA_VERSION = 1
+export const SCENARIO_PACK_SCHEMA_VERSION = 2
 const CURRENT_APP_VERSION = '0.2.0'
 
 const issue = (path: string, message: string, severity: ValidationIssue['severity'] = 'error'): ValidationIssue => ({ path, message, severity })
@@ -86,7 +87,7 @@ export const validatePack = (pack: ScenarioPack): ValidationIssue[] => {
   if (typeof pack.name !== 'string' || !pack.name.trim()) issues.push(issue('pack.name', 'Pack name is required.'))
   if (typeof pack.version !== 'string' || !pack.version.trim()) issues.push(issue('pack.version', 'Pack version is required.'))
   if (typeof pack.author !== 'string' || !pack.author.trim()) issues.push(issue('pack.author', 'Pack author is required.'))
-  if (pack.schemaVersion !== undefined && pack.schemaVersion !== SCENARIO_PACK_SCHEMA_VERSION) issues.push(issue('pack.schemaVersion', `Unsupported pack schema version: ${pack.schemaVersion}.`))
+  if (pack.schemaVersion !== undefined && pack.schemaVersion !== 1 && pack.schemaVersion !== SCENARIO_PACK_SCHEMA_VERSION) issues.push(issue('pack.schemaVersion', `Unsupported pack schema version: ${pack.schemaVersion}.`))
   if (pack.minAppVersion && typeof pack.minAppVersion === 'string') {
     const requiredMajor = Number.parseInt(pack.minAppVersion.split('.')[0], 10)
     const currentMajor = Number.parseInt(CURRENT_APP_VERSION.split('.')[0], 10)
@@ -105,6 +106,7 @@ export const validatePack = (pack: ScenarioPack): ValidationIssue[] => {
     if (ids.has(scenario.id)) issues.push(issue(`pack.scenarios[${index}].id`, `Duplicate scenario id: ${scenario.id}.`))
     ids.add(scenario.id)
     issues.push(...validateScenario(scenario, `pack.scenarios[${index}]`))
+    issues.push(...validateScenarioGraph(scenario, `pack.scenarios[${index}]`))
   }
   const assetIds = new Set<string>()
   for (const [index, asset] of assets.entries()) {

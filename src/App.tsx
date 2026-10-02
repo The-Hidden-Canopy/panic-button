@@ -1,8 +1,9 @@
 import { useEffect, useRef, useState, type CSSProperties } from 'react'
 import { scenarios as builtInScenarios } from './data/scenarios'
-import { createIncident, formatDuration, getPhaseIndex, makeEvent, scaleScenarioDuration } from './lib/incidentEngine'
+import { formatDuration, scaleScenarioDuration } from './lib/incidentEngine'
+import { abortIncidentRuntime, advanceIncidentRuntime, createSeed, dispatchIncidentAction, isRuntimeCorrupt, openIncidentRuntime, projectActiveIncident, recoverIncidentRuntime } from './lib/deterministicRuntime'
 import { MAX_PACK_BYTES, packFromScenarios, parseScenarioPack, validateScenario, verifyPackSignature } from './lib/packValidator'
-import { isTauriRuntime, registerGlobalTrigger, setTheaterMode } from './lib/native'
+import { isTauriRuntime, nativeIncidentStoreEvent, nativeProjectionGet, nativeProjectionSet, registerGlobalTrigger, setTheaterMode } from './lib/native'
 import { clearActiveRunMarker, downloadJson, hydrateNativeValue, loadActiveRunMarker, loadReplays, loadScenarioDrafts, loadSettings, saveReplay, saveScenarioDraft, saveSettings, writeActiveRunMarker } from './lib/storage'
 import { createTriggerGuard } from './lib/triggerGuard'
 import type { ActiveIncident, ReplayRecord, Scenario, Settings, ValidationIssue } from './types'
@@ -47,7 +48,21 @@ const playAlert = (enabled: boolean) => {
 const pickScenario = (items: Scenario[]) => items[Math.floor(Math.random() * items.length)] ?? items[0]
 
 const replayRecord = (incident: ActiveIncident): ReplayRecord => ({ ...incident, id: `run-${incident.startedAt}`, savedAt: Date.now() })
-const recoveredReplay = (incident: ActiveIncident): ReplayRecord => replayRecord({ ...incident, resolved: true, exitReason: 'ERROR', endedAt: Date.now() })
+const recoveredReplay = (incident: ActiveIncident): ReplayRecord => {
+  if (incident.runtimeState && incident.journal) {
+    const persistedRuntime = { state: incident.runtimeState, journal: incident.journal }
+    if (isRuntimeCorrupt(persistedRuntime)) return replayRecord({ ...incident, resolved: true, exitReason: 'ERROR', endedAt: Date.now(), runtimeState: { ...incident.runtimeState, lifecycle: 'CORRUPT' } })
+    const recovered = recoverIncidentRuntime(persistedRuntime, Date.now())
+    return replayRecord({ ...projectActiveIncident(recovered, incident.scenario, incident.startedAt, 'ERROR'), resolved: true, exitReason: 'ERROR', endedAt: Date.now() })
+  }
+  return replayRecord({ ...incident, resolved: true, exitReason: 'ERROR', endedAt: Date.now() })
+}
+
+const persistRuntimeJournal = (runtime: ReturnType<typeof openIncidentRuntime>, startedAt: number) => {
+  if (!isTauriRuntime()) return
+  void Promise.all(runtime.journal.map((event) => nativeIncidentStoreEvent(runtime.state.incidentId, event.sequence, event, event.eventDigest, runtime.state.lifecycle, startedAt)))
+  void nativeProjectionSet({ incidentId: runtime.state.incidentId, scenarioId: runtime.state.scenarioId, lifecycle: runtime.state.lifecycle, simulationTimeMs: runtime.state.simulationTimeMs, phaseIndex: runtime.state.phaseIndex, alerts: runtime.state.alerts.slice(-3), markerCount: runtime.state.markers.filter((marker) => marker.visible).length })
+}
 
 const isMirrorWindow = () => typeof window !== 'undefined' && new URLSearchParams(window.location.search).get('mirror') === '1'
 
@@ -56,6 +71,7 @@ function App() {
 }
 
 function SurveillanceMirror() {
+  const [projection, setProjection] = useState<{ scenarioId?: string; lifecycle?: string; simulationTimeMs?: number; phaseIndex?: number; markerCount?: number }>({})
   useEffect(() => {
     const emergencyExit = (event: KeyboardEvent) => {
       if (event.key === 'Escape') void setTheaterMode(false, false, false)
@@ -63,7 +79,14 @@ function SurveillanceMirror() {
     window.addEventListener('keydown', emergencyExit)
     return () => window.removeEventListener('keydown', emergencyExit)
   }, [])
-  return <div className="mirror-shell"><div className="mirror-topline"><span className="live-dot" /> SECONDARY SURVEILLANCE FEED <strong>SIMULATED DATA</strong></div><div className="mirror-grid"><div className="mirror-radar"><span className="mirror-crosshair" /><span className="mirror-sweep" /></div><div className="mirror-copy"><span className="classification">REMOTE DISPLAY // AUXILIARY COMMAND</span><h1>OPERATIONAL THEATER ACTIVE</h1><p>This display is a theatrical mirror. All imagery, coordinates, and incident telemetry are simulated.</p><div className="mirror-status"><span>UPLINK</span><b>STABLE</b><span>THREAT LEVEL</span><b>ABSURD</b><span>RESPONSE</span><b>OVERALLOCATED</b></div></div></div><div className="mirror-footer">HIDDEN CANOPY // PANIC BUTTON // OFFLINE CORE // ESC REMAINS THE EMERGENCY EXIT</div></div>
+  useEffect(() => {
+    let cancelled = false
+    const poll = async () => { const value = await nativeProjectionGet(); if (!cancelled && value && typeof value === 'object') setProjection(value as typeof projection) }
+    void poll()
+    const timer = window.setInterval(() => void poll(), 350)
+    return () => { cancelled = true; window.clearInterval(timer) }
+  }, [])
+  return <div className="mirror-shell"><div className="mirror-topline"><span className="live-dot" /> SECONDARY SURVEILLANCE FEED <strong>SIMULATED DATA</strong></div><div className="mirror-grid"><div className="mirror-radar"><span className="mirror-crosshair" /><span className="mirror-sweep" /></div><div className="mirror-copy"><span className="classification">REMOTE DISPLAY // AUXILIARY COMMAND</span><h1>{projection.scenarioId ? `LIVE // ${projection.scenarioId.replaceAll('-', ' ').toUpperCase()}` : 'OPERATIONAL THEATER ACTIVE'}</h1><p>This display is a theatrical projection of the primary incident state. All imagery, coordinates, and telemetry are simulated.</p><div className="mirror-status"><span>UPLINK</span><b>{projection.lifecycle ?? 'STANDBY'}</b><span>PHASE</span><b>{projection.phaseIndex === undefined ? '—' : String(projection.phaseIndex + 1).padStart(2, '0')}</b><span>MARKERS</span><b>{projection.markerCount ?? 0}</b></div></div></div><div className="mirror-footer">HIDDEN CANOPY // PANIC BUTTON // OFFLINE CORE // ESC REMAINS THE EMERGENCY EXIT</div></div>
 }
 
 function CommandCenter() {
@@ -85,6 +108,8 @@ function CommandCenter() {
   const editorScenario = scenarios.find((scenario) => scenario.id === selectedScenarioId) ?? scenarios[0]
   const triggerRef = useRef<() => void>(() => undefined)
   const incidentRef = useRef<ActiveIncident | null>(null)
+  const runtimeRef = useRef<ReturnType<typeof openIncidentRuntime> | null>(null)
+  const monotonicStartRef = useRef<number | null>(null)
   const exitRef = useRef<(reason: ActiveIncident['exitReason']) => void>(() => undefined)
   const triggerGuardRef = useRef(createTriggerGuard())
 
@@ -94,7 +119,12 @@ function CommandCenter() {
       setNotice('TRIGGER HELD // ACTIVE INCIDENT OR COOLDOWN IN EFFECT')
       return false
     }
-    const next = createIncident(scaleScenarioDuration(scenario, settings.durationSeconds))
+    const scaledScenario = scaleScenarioDuration(scenario, settings.durationSeconds)
+    const runtime = openIncidentRuntime(scaledScenario, createSeed(scaledScenario.id, now), now)
+    const next = projectActiveIncident(runtime, scaledScenario, now)
+    runtimeRef.current = runtime
+    monotonicStartRef.current = typeof performance !== 'undefined' ? performance.now() : now
+    persistRuntimeJournal(runtime, now)
     setIncident(next)
     writeActiveRunMarker(next)
     setLastReplay(null)
@@ -112,7 +142,17 @@ function CommandCenter() {
   const exitIncident = (reason: ActiveIncident['exitReason']) => {
     setIncident((current) => {
       if (!current) return current
-      const completed = { ...current, resolved: true, exitReason: reason, endedAt: Date.now() }
+      const runtime = runtimeRef.current
+      const finalRuntime = runtime
+        ? reason === 'EMERGENCY_EXIT'
+          ? abortIncidentRuntime(runtime, reason, Date.now())
+          : advanceIncidentRuntime(runtime, current.scenario, current.scenario.durationSeconds * 1000, Date.now())
+        : null
+      const completed = finalRuntime
+        ? { ...projectActiveIncident(finalRuntime, current.scenario, current.startedAt, reason), resolved: true, exitReason: reason, endedAt: Date.now() }
+        : { ...current, resolved: true, exitReason: reason, endedAt: Date.now() }
+      runtimeRef.current = finalRuntime
+      if (finalRuntime) persistRuntimeJournal(finalRuntime, current.startedAt)
       setLastReplay(completed)
       saveReplay(replayRecord(completed))
       clearActiveRunMarker()
@@ -120,6 +160,21 @@ function CommandCenter() {
       void setTheaterMode(false, false, false)
       setNotice(reason === 'EMERGENCY_EXIT' ? 'EMERGENCY EXIT // THE SITUATION HAS BEEN CONTAINED' : 'INCIDENT CLOSED // NO FURTHER ACTION REQUIRED')
       return completed
+    })
+  }
+
+  const dispatchAction = (actionId: string) => {
+    setIncident((current) => {
+      const runtime = runtimeRef.current
+      if (!current || !runtime) return current
+      const action = current.scenario.actions?.find((item) => item.id === actionId)
+      if (!action) return current
+      const updatedRuntime = dispatchIncidentAction(runtime, current.scenario, { actionId, kind: action.kind, resourceId: action.resourceId, amount: action.amount, markerId: action.markerId, targetNodeId: action.targetNodeId }, runtime.state.simulationTimeMs, Date.now())
+      runtimeRef.current = updatedRuntime
+      const projected = projectActiveIncident(updatedRuntime, current.scenario, current.startedAt)
+      persistRuntimeJournal(updatedRuntime, current.startedAt)
+      writeActiveRunMarker(projected)
+      return projected
     })
   }
 
@@ -205,16 +260,18 @@ function CommandCenter() {
     const timer = window.setInterval(() => {
       setIncident((current) => {
         if (!current || current.resolved) return current
-        const elapsedSeconds = current.elapsedSeconds + 1
-        const phaseIndex = getPhaseIndex(current.scenario, elapsedSeconds)
-        const phaseChanged = phaseIndex !== current.phaseIndex
-        const phase = current.scenario.phases[phaseIndex]
-        const events = phaseChanged
-          ? [...current.events, makeEvent(elapsedSeconds, phase.label, phase.objective, 'info')]
-          : current.events
+        const runtime = runtimeRef.current
+        if (!runtime) return current
+        const monotonicNow = typeof performance !== 'undefined' ? performance.now() : Date.now()
+        const start = monotonicStartRef.current ?? monotonicNow
+        const updatedRuntime = advanceIncidentRuntime(runtime, current.scenario, Math.max(0, monotonicNow - start), Date.now())
+        runtimeRef.current = updatedRuntime
+        persistRuntimeJournal(updatedRuntime, current.startedAt)
+        const phaseChanged = updatedRuntime.state.phaseIndex !== current.phaseIndex
         if (phaseChanged) playAlert(settings.soundEnabled)
-        if (elapsedSeconds >= current.scenario.durationSeconds) {
-          const completed = { ...current, elapsedSeconds, phaseIndex, events, resolved: true, exitReason: 'AUTO_DISMISSED' as const }
+        const updated = projectActiveIncident(updatedRuntime, current.scenario, current.startedAt)
+        if (updatedRuntime.state.lifecycle === 'SUMMARY') {
+          const completed = { ...updated, resolved: true, exitReason: 'AUTO_DISMISSED' as const, endedAt: Date.now() }
           setLastReplay(completed)
           saveReplay(replayRecord(completed))
           clearActiveRunMarker()
@@ -223,7 +280,6 @@ function CommandCenter() {
           setNotice('AUTO-DISPATCH COMPLETE // PIZZA-CLASS THREAT RETURNED TO BASELINE')
           return completed
         }
-        const updated = { ...current, elapsedSeconds, phaseIndex, events }
         writeActiveRunMarker(updated)
         return updated
       })
@@ -338,7 +394,7 @@ function CommandCenter() {
 
         <div className="status-strip"><span className="status-pulse" /> {notice}<span className="strip-right">{new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })} EST</span></div>
 
-        {view === 'command' && <CommandView incident={incident} scenario={activeScenario} phase={phase} remaining={remaining} progress={progress} elapsed={elapsed} onStart={startIncident} onExit={() => exitIncident('RESOLVED')} />}
+        {view === 'command' && <CommandView incident={incident} scenario={activeScenario} phase={phase} remaining={remaining} progress={progress} elapsed={elapsed} onStart={startIncident} onExit={() => exitIncident('RESOLVED')} onAction={dispatchAction} />}
         {view === 'timeline' && <TimelineView incident={incident ?? lastReplay} onStart={startIncident} onExport={(replay) => {
           const record = replayRecord(replay)
           downloadJson(`${replay.scenario.id}-${record.id}.json`, record)
@@ -351,9 +407,11 @@ function CommandCenter() {
   )
 }
 
-function CommandView({ incident, scenario, phase, remaining, progress, elapsed, onStart, onExit }: { incident: ActiveIncident | null; scenario: Scenario; phase: Scenario['phases'][number]; remaining: number; progress: number; elapsed: number; onStart: () => void; onExit: () => void }) {
-  const currentReport = scenario.reports.find((report) => report.id === phase.reportIds[0]) ?? scenario.reports[0]
+function CommandView({ incident, scenario, phase, remaining, progress, elapsed, onStart, onExit, onAction }: { incident: ActiveIncident | null; scenario: Scenario; phase: Scenario['phases'][number]; remaining: number; progress: number; elapsed: number; onStart: () => void; onExit: () => void; onAction: (actionId: string) => void }) {
+  const currentReport = incident?.runtimeState?.reports.at(-1) ?? scenario.reports.find((report) => report.id === phase.reportIds[0]) ?? scenario.reports[0]
   const isLive = Boolean(incident && !incident.resolved)
+  const resources = incident?.runtimeState?.resources ?? scenario.resources
+  const markers = (incident?.runtimeState?.markers.filter((marker) => marker.visible) ?? scenario.markers)
   return (
     <div className="content-grid">
       <section className="hero-panel panel scanline-overlay">
@@ -362,12 +420,12 @@ function CommandView({ incident, scenario, phase, remaining, progress, elapsed, 
         <div className="countdown-row"><div><span className="tiny-label">TIME TO STABILIZATION</span><div className="countdown">{formatDuration(remaining)}</div></div><div className="progress-track"><span style={{ width: `${progress}%` }} /></div><div className="phase-readout"><span className="tiny-label">CURRENT PHASE</span><strong>{phase.label}</strong><small>{phase.objective}</small></div></div>
         {!incident && <div className="standby-callout"><span className="standby-icon">✦</span><div><strong>COMMAND CENTER STANDING BY</strong><p>Press the red button or <kbd>Ctrl</kbd> + <kbd>Shift</kbd> + <kbd>P</kbd> to escalate an ordinary problem into an avoidable national emergency.</p></div><button className="primary-button" onClick={onStart}>INITIATE RANDOM INCIDENT <span>→</span></button></div>}
         {incident?.resolved && <div className="standby-callout resolved-callout"><span className="standby-icon">✓</span><div><strong>INCIDENT CONTAINED</strong><p>{scenario.resolution}</p></div><button className="primary-button" onClick={onStart}>NEW INCIDENT <span>→</span></button></div>}
-        <div className="map-shell"><div className="map-toolbar"><span>TACTICAL MAP // SYNTHETIC FEED</span><span><i className="map-legend alert" /> COMMAND <i className="map-legend unit" /> UNITS <i className="map-legend neutral" /> UNKNOWN</span></div><div className="tactical-map"><div className="map-water" /><div className="map-road road-a" /><div className="map-road road-b" /><div className="map-road road-c" /><div className="map-blocks" />{scenario.markers.map((marker) => <div className={`map-marker ${marker.tone}`} key={marker.id} style={{ left: `${marker.x}%`, top: `${marker.y}%` }}><span className="marker-ping" /><span className="marker-label">{marker.label}</span></div>)}<div className="map-coordinates">40° 42' 46.1" N<br />74° 00' 21.5" W</div><div className="map-stamp">SIMULATED<br />SATELLITE<br />IMAGERY</div></div></div>
+        <div className="map-shell"><div className="map-toolbar"><span>TACTICAL MAP // SYNTHETIC FEED</span><span><i className="map-legend alert" /> COMMAND <i className="map-legend unit" /> UNITS <i className="map-legend neutral" /> UNKNOWN</span></div><div className="tactical-map"><div className="map-water" /><div className="map-road road-a" /><div className="map-road road-b" /><div className="map-road road-c" /><div className="map-blocks" />{markers.map((marker) => <div className={`map-marker ${marker.tone}`} key={marker.id} style={{ left: `${marker.x}%`, top: `${marker.y}%` }}><span className="marker-ping" /><span className="marker-label">{marker.label}</span></div>)}<div className="map-coordinates">40° 42' 46.1" N<br />74° 00' 21.5" W</div><div className="map-stamp">SIMULATED<br />SATELLITE<br />IMAGERY</div></div></div>
       </section>
       <aside className="right-column">
-        <section className="panel resource-panel"><PanelHeader title="RESOURCE ALLOCATION" tag="LIVE" /><div className="resource-list">{scenario.resources.map((resource) => <div className="resource-row" key={resource.id}><span className="resource-icon" style={{ color: resource.color }}>{resource.icon}</span><span className="resource-name">{resource.label}<small>{resource.unit}</small></span><strong style={{ color: resource.color }}>{resource.value}</strong></div>)}</div><div className="resource-footer"><span>OVERREACTION INDEX</span><strong>{isLiveNumber(incident) ? 94 : 12}<small>/100</small></strong></div></section>
-        <section className="panel report-panel"><PanelHeader title="LATEST SITREP" tag={currentReport.classification} /><div className="report-number">REPORT {String(scenario.reports.indexOf(currentReport) + 1).padStart(2, '0')} <span>({formatDuration(elapsed)})</span></div><h3>{currentReport.heading}</h3><p>{currentReport.body}</p><div className="recommendation"><span>RECOMMENDATION</span>{currentReport.recommendation}</div><div className="confidence"><span>CONFIDENCE</span><div className="confidence-track"><span style={{ width: `${currentReport.confidence}%` }} /></div><strong>{currentReport.confidence}%</strong></div></section>
-        <section className="panel phase-panel"><PanelHeader title="OPERATIONAL PHASES" tag={`${scenario.phases.length} STAGES`} />{scenario.phases.map((item, index) => <div className={`phase-row ${index === (incident?.phaseIndex ?? 0) && isLive ? 'current' : ''} ${index < (incident?.phaseIndex ?? 0) ? 'complete' : ''}`} key={item.id}><span className="phase-index">{index < (incident?.phaseIndex ?? 0) ? '✓' : `0${index + 1}`}</span><span>{item.label}<small>{item.objective}</small></span></div>)}</section>
+        <section className="panel resource-panel"><PanelHeader title="RESOURCE ALLOCATION" tag="LIVE" /><div className="resource-list">{resources.map((resource) => <div className="resource-row" key={resource.id}><span className="resource-icon" style={{ color: resource.color }}>{resource.icon}</span><span className="resource-name">{resource.label}<small>{resource.unit}</small></span><strong style={{ color: resource.color }}>{resource.value}</strong></div>)}</div><div className="resource-footer"><span>OVERREACTION INDEX</span><strong>{isLiveNumber(incident) ? 94 : 12}<small>/100</small></strong></div></section>
+        <section className="panel report-panel"><PanelHeader title="LATEST SITREP" tag={currentReport.classification} /><div className="report-number">REPORT {String(Math.max(0, scenario.reports.findIndex((report) => report.id === currentReport.id) + 1)).padStart(2, '0')} <span>({formatDuration(elapsed)})</span></div><h3>{currentReport.heading}</h3><p>{currentReport.body}</p><div className="recommendation"><span>RECOMMENDATION</span>{currentReport.recommendation}</div><div className="confidence"><span>CONFIDENCE</span><div className="confidence-track"><span style={{ width: `${currentReport.confidence}%` }} /></div><strong>{currentReport.confidence}%</strong></div></section>
+        <section className="panel phase-panel"><PanelHeader title="OPERATIONAL PHASES" tag={`${scenario.phases.length} STAGES`} />{scenario.phases.map((item, index) => <div className={`phase-row ${index === (incident?.phaseIndex ?? 0) && isLive ? 'current' : ''} ${index < (incident?.phaseIndex ?? 0) ? 'complete' : ''}`} key={item.id}><span className="phase-index">{index < (incident?.phaseIndex ?? 0) ? '✓' : `0${index + 1}`}</span><span>{item.label}<small>{item.objective}</small></span></div>)}{isLive && scenario.actions?.map((action) => <button className="secondary-button action-button" key={action.id} onClick={() => onAction(action.id)}>{action.label} <span>→</span></button>)}</section>
       </aside>
       <section className="panel ticker-panel"><span className="ticker-label">LIVE WIRE</span><div className="ticker-track"><span>{isLive ? `${phase.alerts[0]} // ${phase.alerts[1] ?? 'MONITORING CONTINUES'} // ${currentReport.recommendation}` : 'NO ACTIVE THREATS // THE HOUSEHOLD REMAINS SUSPICIOUSLY CALM // READY TO OVERREACT'}</span></div><button className="text-button" onClick={onExit}>MARK STABLE</button></section>
     </div>
