@@ -14,9 +14,7 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
-      - run: npm test
-      - run: npm audit --audit-level=high
-      - run: npm run build
+      - run: npm run verify
 
   native:
     runs-on: windows-latest
@@ -28,7 +26,8 @@ jobs:
           cache: npm
       - uses: dtolnay/rust-toolchain@stable
       - run: npm ci
-      - run: npm test
+      - run: npm test -- --run
+      - run: cargo fmt --check --manifest-path src-tauri/Cargo.toml
       - run: cargo check --manifest-path src-tauri/Cargo.toml
       - run: npm run tauri:build
       - uses: actions/upload-artifact@v4

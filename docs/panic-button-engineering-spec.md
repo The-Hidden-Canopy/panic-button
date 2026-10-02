@@ -22,7 +22,7 @@ Panic Button is a standalone Windows desktop party app, not a host plugin. Its e
 - Optional Ed25519 pack signature verification and minimum-app-version compatibility checks.
 - Native SQLite persistence with incident/event/trusted-signer tables and browser-compatible fallback.
 - Optional secondary-display surveillance mirrors labeled as simulated.
-- Synthetic maps, fake satellite layers, situation reports, resources, timelines, and alert audio.
+- Synthetic maps, fake satellite layers, situation reports, resources, timelines, and local procedural alert audio with captions.
 - No accounts, telemetry, cloud dependency, arbitrary commands, or runtime network assets.
 
 ## Runtime state machine
@@ -51,7 +51,8 @@ The initial duration is 90 seconds and is configurable between 15 and 300 second
 - `src/data/scenarios.ts`: built-in incident content.
 - `src/lib/incidentEngine.ts`: compatibility helpers for the dashboard projection.
 - `src/lib/deterministicRuntime.ts`: pure reducer, journal, virtual clock, named seeded PRNG streams, bounded actions, graph migration, recovery, and replay verification.
-- `src/lib/native.ts`: Tauri shortcut registration with browser fallback.
+- `src/lib/native.ts`: Tauri shortcut registration, SQLite incident/packs/trust bridge, and browser fallback.
+- `src/lib/audio.ts`: offline procedural siren, alert, radio, and stinger cues.
 - `src/styles.css`: retro disaster-broadcast visual system.
 
 ## Scenario contract
@@ -90,13 +91,15 @@ type Scenario = {
 
 The command center contains a classified incident header, countdown, severity seal, synthetic tactical map, resource rail, current situation report, operational phases, and live-wire ticker. All imagery is visibly marked `SIMULATED SATELLITE IMAGERY`.
 
-The Scenario Lab supports title, premise, severity, duration, resolution, scenario selection, draft saving, JSON preview, and preview activation. It is intentionally form-driven rather than scriptable.
+The Scenario Lab supports title, premise, severity, duration, resolution, scenario selection, graph nodes, closed operator actions, draft saving, JSON preview, pack staging, explicit signer trust, and preview activation. It is intentionally form-driven rather than scriptable.
 
 Accessibility requirements include keyboard navigation, high contrast, mute controls, captions/transcripts for spoken audio, and reduced motion that removes flashing, shake, scanline animation, and rapid transitions.
 
 ## Native commands and events
 
-Reserved Tauri command names:
+The product-level command names remain the following stable boundary. The current Tauri implementation exposes the storage-oriented snake-case commands listed below them; the browser preview uses the same frontend behavior with local fallback storage.
+
+Reserved product command names:
 
 ```text
 settings.get
@@ -121,6 +124,17 @@ accessibility.get
 accessibility.update
 ```
 
+Implemented native commands:
+
+```text
+storage_get / storage_set / storage_delete
+incident_store_event / incident_load_events
+trust_signer / trusted_signers
+pack_stage / pack_install / pack_list / pack_remove
+draft_save / draft_list
+set_surveillance_windows
+```
+
 Frontend event names:
 
 ```text
@@ -138,7 +152,7 @@ runtime-error
 
 ## Storage and update boundary
 
-The browser preview keeps versioned/checksummed local settings and drafts for iteration. In packaged Tauri builds, the authoritative incident journal is appended to SQLite in WAL mode (`incidents` and `incident_events`), with `trusted_signers` storing explicit `trusted`, `local`, `blocked`, or `unknown` states. Signed packs are verified when signatures are present, but signature validity and trust are separate decisions. Runtime remains offline.
+The browser preview keeps versioned/checksummed local settings, drafts, replays, and recovery markers for iteration. In packaged Tauri builds, the authoritative incident journal is appended to SQLite in WAL mode (`incidents` and `incident_events`), while `scenario_packs`, `scenario_drafts`, and `trusted_signers` persist admission decisions and authoring state. Signed packs are verified when signatures are present, but signature validity and trust are separate decisions. Runtime remains offline.
 
 ## Safety requirements
 
@@ -151,6 +165,7 @@ The browser preview keeps versioned/checksummed local settings and drafts for it
 - If a run is interrupted, record it as aborted and start cleanly next time.
 - Replays are reconstructed from pack/scenario digest, seed, settings projection, and ordered actions; the final React snapshot is not the source of truth.
 - Corrupt journal chains are not auto-replayed; they remain exportable for recovery inspection.
+- Native recovery hydrates the event journal before reconstructing the interrupted run; the browser marker is only a recovery pointer.
 
 ## Acceptance criteria
 
@@ -171,9 +186,11 @@ The browser preview keeps versioned/checksummed local settings and drafts for it
 - `npm test`, `npm run build`, `npm audit --audit-level=high`, `cargo check --manifest-path src-tauri/Cargo.toml`, and `npm run tauri:build` pass.
 - Malformed or unsafe scenario packs are rejected before activation.
 
+For evidence and external-gate ownership, see [acceptance-matrix.md](acceptance-matrix.md).
+
 ## Future slices
 
-1. Add signed update manifests, explicit approval, and rollback for remote pack distribution.
+1. Add signed update manifests, explicit approval, and rollback for optional remote pack distribution.
 2. Add code signing and clean-machine Windows acceptance automation.
 3. Add richer SQLite replay queries and retention controls.
-4. Add bundled local audio assets and captioned radio chatter.
+4. Add a native trigger settings command surface if the product needs settings to be controlled outside the React shell.

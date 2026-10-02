@@ -12,7 +12,8 @@
     "generate:icon": "node scripts/generate-icon.mjs",
     "tauri": "tauri",
     "tauri:dev": "tauri dev",
-    "tauri:build": "tauri build"
+    "tauri:build": "tauri build",
+    "verify": "npm test -- --run && npm run build && npm audit --audit-level=high"
   },
   "dependencies": {
     "@noble/ed25519": "^3.0.0",

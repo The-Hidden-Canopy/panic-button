@@ -27,6 +27,7 @@ The repository contains a working engineering build:
 - Optional Ed25519 pack signature verification and app-version compatibility checks.
 - Native Tauri SQLite persistence with incident/event/trusted-signer tables and browser fallback.
 - Optional full-screen simulated surveillance mirrors on secondary displays.
+- Local procedural alert audio with captions; no runtime media fetches.
 - Local replay persistence and replay JSON export.
 - Local settings for sound, reduced motion, display behavior, and duration.
 - Ten built-in scenarios covering mundane household, office, delivery, and device incidents.
@@ -57,12 +58,17 @@ The native shell registers `CommandOrControl+Shift+P` through Tauri's global sho
 ## Build checks
 
 ```powershell
-npm run build
+npm run verify
+cargo fmt --check --manifest-path src-tauri/Cargo.toml
 cargo check --manifest-path src-tauri/Cargo.toml
-npm test
-npm audit --audit-level=high
 npm run tauri:build
 ```
+
+The claim-by-claim status of the docuseries gates is recorded in
+[docs/acceptance-matrix.md](docs/acceptance-matrix.md). Automated checks prove
+the kernel, pack boundary, replay logic, and build artifacts; clean-machine,
+multi-monitor, physical-button, and code-signing checks remain host or release
+operations rather than claims made by the source tree.
 
 `npm run tauri:build` produces a Windows executable and an NSIS current-user installer under `src-tauri/target/release/bundle/`.
 
@@ -74,6 +80,7 @@ src/
   data/scenarios.ts       built-in scenario pack
   lib/incidentEngine.ts   compatibility helpers for the dashboard
   lib/deterministicRuntime.ts journal-first reducer, clock, PRNG, graph, and replay
+  lib/audio.ts             offline procedural cues and caption-compatible output
   lib/native.ts           Tauri/browser trigger boundary
   lib/storage.ts          versioned settings, drafts, replays, recovery markers
   lib/triggerGuard.ts     debounce and post-incident cooldown gate
@@ -85,6 +92,7 @@ scripts/
   generate-icon.mjs       reproducible local Windows icon generation
 docs/
   panic-button-engineering-spec.md
+  acceptance-matrix.md
 ```
 
 ## Safety and privacy
