@@ -3,7 +3,7 @@ import { scenarios as builtInScenarios } from './data/scenarios'
 import { formatDuration, scaleScenarioDuration } from './lib/incidentEngine'
 import { abortIncidentRuntime, advanceIncidentRuntime, createIncidentPackage, createSeed, dispatchIncidentAction, isRuntimeCorrupt, migrateScenarioToV2, openIncidentRuntime, projectActiveIncident, recoverIncidentRuntime, reconstructRuntime, validateScenarioGraph } from './lib/deterministicRuntime'
 import { MAX_PACK_BYTES, admitPack, packFromScenarios, parseScenarioPack, validateScenario } from './lib/packValidator'
-import { isTauriRuntime, nativeIncidentStoreEvent, nativeProjectionGet, nativeProjectionSet, nativeTrustedSigners, registerGlobalTrigger, setTheaterMode } from './lib/native'
+import { isTauriRuntime, nativeIncidentLoadEvents, nativeIncidentStoreEvent, nativeProjectionGet, nativeProjectionSet, nativeTrustSigner, nativeTrustedSigners, registerGlobalTrigger, setTheaterMode } from './lib/native'
 import { clearActiveRunMarker, downloadJson, hydrateNativeValue, installPackRecord, loadActiveRunMarker, loadReplays, loadScenarioDrafts, loadSettings, loadStagedPacks, packRecordFor, savePackRecord, saveReplay, saveScenarioDraft, saveSettings, writeActiveRunMarker } from './lib/storage'
 import { createTriggerGuard } from './lib/triggerGuard'
 import { playLocalCue, stopLocalCues } from './lib/audio'
@@ -229,7 +229,7 @@ function CommandCenter() {
       hydrateNativeValue('panic-button-scenarios'),
       hydrateNativeValue('panic-button-replays'),
       hydrateNativeValue('panic-button-active-run'),
-    ]).then(([nativeSettings, nativeScenarios, nativeReplays, nativeActiveRun]) => {
+    ]).then(async ([nativeSettings, nativeScenarios, nativeReplays, nativeActiveRun]) => {
       if (cancelled) return
       if (nativeSettings && typeof nativeSettings === 'object') setSettings((current) => ({ ...current, ...(nativeSettings as Partial<Settings>) }))
       if (Array.isArray(nativeScenarios)) {
@@ -239,8 +239,14 @@ function CommandCenter() {
         setScenarios([...mergedBuiltIns, ...custom])
       }
       if (Array.isArray(nativeReplays) && nativeReplays[0]) setLastReplay(nativeReplays[0] as ActiveIncident)
-      if (!recoveryRun && nativeActiveRun && typeof nativeActiveRun === 'object') {
-        const recovered = recoveredReplay(nativeActiveRun as ActiveIncident)
+      let authoritativeActiveRun = nativeActiveRun
+      if (nativeActiveRun && typeof nativeActiveRun === 'object') {
+        const candidate = nativeActiveRun as ActiveIncident
+        const nativeEvents = await nativeIncidentLoadEvents(candidate.runtimeState?.incidentId ?? '')
+        if (nativeEvents.length > 0) authoritativeActiveRun = { ...candidate, journal: nativeEvents as ActiveIncident['journal'] }
+      }
+      if (!recoveryRun && authoritativeActiveRun && typeof authoritativeActiveRun === 'object') {
+        const recovered = recoveredReplay(authoritativeActiveRun as ActiveIncident)
         setLastReplay(recovered)
         saveReplay(recovered)
         clearActiveRunMarker()
@@ -362,6 +368,20 @@ function CommandCenter() {
     setNotice(`PACK INSTALLED // ${installed.pack.name}`)
   }
 
+  const trustStagedSigner = () => {
+    const signer = stagedPack?.pack.signer
+    if (!signer) return
+    const trusted: TrustedSigner = { ...signer, trustState: 'trusted' }
+    void nativeTrustSigner(trusted)
+    setTrustedSigners((current) => [...current.filter((item) => item.fingerprint !== trusted.fingerprint), trusted])
+    if (stagedPack) {
+      const updated = { ...stagedPack, admission: { ...stagedPack.admission, signerKnown: true, signerTrusted: true, state: 'TRUSTED' as const, message: undefined } }
+      setStagedPack(updated)
+      savePackRecord(updated)
+    }
+    setNotice(`SIGNER TRUSTED // ${signer.displayName}`)
+  }
+
   const navItems: { id: View; label: string; icon: string }[] = [
     { id: 'command', label: 'COMMAND', icon: '⌁' },
     { id: 'timeline', label: 'TIMELINE', icon: '◷' },
@@ -419,7 +439,7 @@ function CommandCenter() {
           downloadJson(`${replay.scenario.id}-${record.id}.incident.json`, createIncidentPackage(replay))
         }} />}
         {view === 'reports' && <ReportsView incident={incident ?? lastReplay} scenario={activeScenario} />}
-        {view === 'editor' && <EditorView scenario={editorScenario} scenarios={scenarios} selectedId={selectedScenarioId} issues={packIssues} stagedPack={stagedPack} onSelect={setSelectedScenarioId} onUpdate={updateEditorScenario} onSave={() => saveEditorScenario(editorScenario)} onImport={importPack} onInstall={installStagedPack} onExport={() => downloadJson(`${editorScenario.id}-pack.json`, packFromScenarios([editorScenario], 'Local Scenario Export'))} onPreview={() => startSpecificIncident(editorScenario)} />}
+        {view === 'editor' && <EditorView scenario={editorScenario} scenarios={scenarios} selectedId={selectedScenarioId} issues={packIssues} stagedPack={stagedPack} onSelect={setSelectedScenarioId} onUpdate={updateEditorScenario} onSave={() => saveEditorScenario(editorScenario)} onImport={importPack} onInstall={installStagedPack} onTrust={trustStagedSigner} onExport={() => downloadJson(`${editorScenario.id}-pack.json`, packFromScenarios([editorScenario], 'Local Scenario Export'))} onPreview={() => startSpecificIncident(editorScenario)} />}
         {view === 'settings' && <SettingsView settings={settings} onUpdate={updateSettings} />}
       </main>
     </div>
@@ -471,12 +491,12 @@ function ReportsView({ incident, scenario }: { incident: ActiveIncident | null; 
   return <div className="single-column"><section className="panel detail-panel"><PanelHeader title="SITUATION REPORTS" tag="EYES ONLY" /><div className="report-grid">{scenario.reports.map((report, index) => <article className={`report-card ${incident?.phaseIndex === index ? 'selected' : ''}`} key={report.id}><div className="report-card-top"><span>{report.classification}</span><b>REPORT {String(index + 1).padStart(2, '0')}</b></div><h3>{report.heading}</h3><p>{report.body}</p><div className="report-card-footer"><span>RECOMMENDATION</span><strong>{report.recommendation}</strong><em>{report.confidence}% CONFIDENCE</em></div></article>)}</div></section></div>
 }
 
-function EditorView({ scenario, scenarios, selectedId, issues, stagedPack, onSelect, onUpdate, onSave, onImport, onInstall, onExport, onPreview }: { scenario: Scenario; scenarios: Scenario[]; selectedId: string; issues: ValidationIssue[]; stagedPack: PackRecord | null; onSelect: (id: string) => void; onUpdate: (patch: Partial<Scenario>) => void; onSave: () => boolean; onImport: (file: File) => void; onInstall: () => void; onExport: () => void; onPreview: () => void }) {
+function EditorView({ scenario, scenarios, selectedId, issues, stagedPack, onSelect, onUpdate, onSave, onImport, onInstall, onTrust, onExport, onPreview }: { scenario: Scenario; scenarios: Scenario[]; selectedId: string; issues: ValidationIssue[]; stagedPack: PackRecord | null; onSelect: (id: string) => void; onUpdate: (patch: Partial<Scenario>) => void; onSave: () => boolean; onImport: (file: File) => void; onInstall: () => void; onTrust: () => void; onExport: () => void; onPreview: () => void }) {
   const [saved, setSaved] = useState(false)
   const [jsonOpen, setJsonOpen] = useState(false)
   const fileInput = useRef<HTMLInputElement>(null)
   const save = () => { if (onSave()) { setSaved(true); window.setTimeout(() => setSaved(false), 1600) } }
-  return <div className="single-column"><section className="panel editor-panel"><PanelHeader title="SCENARIO LAB" tag="LOCAL AUTHORING" /><div className="editor-toolbar"><div><span className="tiny-label">SCENARIO PACK</span><select value={selectedId} onChange={(event) => onSelect(event.target.value)}>{scenarios.map((item) => <option value={item.id} key={item.id}>{item.title}</option>)}</select></div><div className="editor-actions"><input ref={fileInput} type="file" accept="application/json,.json,.panicpack" hidden onChange={(event) => { const file = event.target.files?.[0]; if (file) onImport(file); event.target.value = '' }} /><button className="secondary-button" onClick={() => fileInput.current?.click()}>IMPORT PACK</button>{stagedPack && <button className="primary-button small" onClick={onInstall}>INSTALL STAGED PACK</button>}<button className="secondary-button" onClick={onExport}>EXPORT PACK</button><button className="secondary-button" onClick={() => setJsonOpen(!jsonOpen)}>{jsonOpen ? 'HIDE JSON' : 'VIEW JSON'}</button><button className="secondary-button" onClick={onPreview}>PREVIEW INCIDENT</button><button className="primary-button small" onClick={save}>{saved ? 'SAVED ✓' : 'SAVE DRAFT'}</button></div></div><div className="editor-grid"><label><span>TITLE</span><input value={scenario.title} onChange={(event) => onUpdate({ title: event.target.value.toUpperCase() })} /></label><label><span>SEVERITY</span><select value={scenario.severity} onChange={(event) => onUpdate({ severity: event.target.value as Scenario['severity'] })}><option>LOW</option><option>ELEVATED</option><option>CRITICAL</option><option>CATASTROPHIC</option></select></label><label className="wide"><span>PREMISE</span><textarea value={scenario.premise} onChange={(event) => onUpdate({ premise: event.target.value })} rows={3} /></label><label><span>DURATION (SECONDS)</span><input type="number" min="15" max="300" value={scenario.durationSeconds} onChange={(event) => onUpdate({ durationSeconds: Math.max(15, Math.min(300, Number(event.target.value))) })} /></label><label><span>RESOLUTION</span><input value={scenario.resolution} onChange={(event) => onUpdate({ resolution: event.target.value })} /></label></div><GraphEditor scenario={scenario} onUpdate={onUpdate} />{issues.length > 0 && <div className="validation-box"><strong>PACK VALIDATION</strong>{issues.map((item) => <div className={item.severity} key={`${item.path}-${item.message}`}>{item.path}: {item.message}</div>)}</div>}{jsonOpen && <pre className="json-preview">{JSON.stringify(scenario, null, 2)}</pre>}<div className="editor-note"><span>ⓘ</span><p>Scenario packs are staged, admitted, and explicitly installed. Executable code, external URLs, arbitrary paths, and unsafe assets are rejected by the pack validator before activation.</p></div></section></div>
+  return <div className="single-column"><section className="panel editor-panel"><PanelHeader title="SCENARIO LAB" tag="LOCAL AUTHORING" /><div className="editor-toolbar"><div><span className="tiny-label">SCENARIO PACK</span><select value={selectedId} onChange={(event) => onSelect(event.target.value)}>{scenarios.map((item) => <option value={item.id} key={item.id}>{item.title}</option>)}</select></div><div className="editor-actions"><input ref={fileInput} type="file" accept="application/json,.json,.panicpack" hidden onChange={(event) => { const file = event.target.files?.[0]; if (file) onImport(file); event.target.value = '' }} /><button className="secondary-button" onClick={() => fileInput.current?.click()}>IMPORT PACK</button>{stagedPack?.pack.signer && !stagedPack.admission.signerTrusted && <button className="secondary-button" onClick={onTrust}>TRUST SIGNER</button>}{stagedPack && <button className="primary-button small" onClick={onInstall}>INSTALL STAGED PACK</button>}<button className="secondary-button" onClick={onExport}>EXPORT PACK</button><button className="secondary-button" onClick={() => setJsonOpen(!jsonOpen)}>{jsonOpen ? 'HIDE JSON' : 'VIEW JSON'}</button><button className="secondary-button" onClick={onPreview}>PREVIEW INCIDENT</button><button className="primary-button small" onClick={save}>{saved ? 'SAVED ✓' : 'SAVE DRAFT'}</button></div></div><div className="editor-grid"><label><span>TITLE</span><input value={scenario.title} onChange={(event) => onUpdate({ title: event.target.value.toUpperCase() })} /></label><label><span>SEVERITY</span><select value={scenario.severity} onChange={(event) => onUpdate({ severity: event.target.value as Scenario['severity'] })}><option>LOW</option><option>ELEVATED</option><option>CRITICAL</option><option>CATASTROPHIC</option></select></label><label className="wide"><span>PREMISE</span><textarea value={scenario.premise} onChange={(event) => onUpdate({ premise: event.target.value })} rows={3} /></label><label><span>DURATION (SECONDS)</span><input type="number" min="15" max="300" value={scenario.durationSeconds} onChange={(event) => onUpdate({ durationSeconds: Math.max(15, Math.min(300, Number(event.target.value))) })} /></label><label><span>RESOLUTION</span><input value={scenario.resolution} onChange={(event) => onUpdate({ resolution: event.target.value })} /></label></div><GraphEditor scenario={scenario} onUpdate={onUpdate} />{issues.length > 0 && <div className="validation-box"><strong>PACK VALIDATION</strong>{issues.map((item) => <div className={item.severity} key={`${item.path}-${item.message}`}>{item.path}: {item.message}</div>)}</div>}{jsonOpen && <pre className="json-preview">{JSON.stringify(scenario, null, 2)}</pre>}<div className="editor-note"><span>ⓘ</span><p>Scenario packs are staged, admitted, and explicitly installed. Executable code, external URLs, arbitrary paths, and unsafe assets are rejected by the pack validator before activation.</p></div></section></div>
 }
 
 function GraphEditor({ scenario, onUpdate }: { scenario: Scenario; onUpdate: (patch: Partial<Scenario>) => void }) {
