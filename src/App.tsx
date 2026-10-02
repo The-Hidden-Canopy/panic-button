@@ -19,11 +19,17 @@ const defaultSettings: Settings = {
   autoStart: false,
   cooldownSeconds: 5,
   mirrorSecondary: false,
+  triggerBinding: { id: 'primary-trigger', type: 'keyboard_shortcut', chord: 'CommandOrControl+Shift+P', enabled: true, debounceMs: 800 },
+  alertVolume: 0.35,
+  musicVolume: 0.2,
+  effectsVolume: 0.35,
+  captionsEnabled: true,
+  highContrast: false,
 }
 
 const readSettings = (): Settings => loadSettings(defaultSettings)
 
-const playAlert = (enabled: boolean) => {
+const playAlert = (enabled: boolean, volume = 0.08) => {
   if (!enabled || typeof window === 'undefined') return
   try {
     const context = new AudioContext()
@@ -33,7 +39,7 @@ const playAlert = (enabled: boolean) => {
     oscillator.frequency.setValueAtTime(440, context.currentTime)
     oscillator.frequency.linearRampToValueAtTime(880, context.currentTime + 0.18)
     gain.gain.setValueAtTime(0.0001, context.currentTime)
-    gain.gain.exponentialRampToValueAtTime(0.08, context.currentTime + 0.03)
+    gain.gain.exponentialRampToValueAtTime(Math.max(0.0001, Math.min(0.2, volume)), context.currentTime + 0.03)
     gain.gain.exponentialRampToValueAtTime(0.0001, context.currentTime + 0.42)
     oscillator.connect(gain)
     gain.connect(context.destination)
@@ -46,6 +52,17 @@ const playAlert = (enabled: boolean) => {
 }
 
 const pickScenario = (items: Scenario[]) => items[Math.floor(Math.random() * items.length)] ?? items[0]
+
+const matchesConfiguredShortcut = (event: KeyboardEvent, chord: string) => {
+  const parts = chord.split('+').map((part) => part.trim().toLowerCase()).filter(Boolean)
+  const key = parts.at(-1)
+  if (!key) return false
+  const wantsControl = parts.includes('ctrl') || parts.includes('control') || parts.includes('commandorcontrol')
+  const wantsAlt = parts.includes('alt') || parts.includes('option')
+  const wantsShift = parts.includes('shift')
+  const wantsMeta = parts.includes('meta') || parts.includes('command')
+  return event.key.toLowerCase() === key && event.ctrlKey === wantsControl && event.altKey === wantsAlt && event.shiftKey === wantsShift && event.metaKey === wantsMeta
+}
 
 const replayRecord = (incident: ActiveIncident): ReplayRecord => ({ ...incident, id: `run-${incident.startedAt}`, savedAt: Date.now() })
 const recoveredReplay = (incident: ActiveIncident): ReplayRecord => {
@@ -103,6 +120,7 @@ function CommandCenter() {
   const [view, setView] = useState<View>('command')
   const [selectedScenarioId, setSelectedScenarioId] = useState(builtInScenarios[0].id)
   const [notice, setNotice] = useState(recoveryRun ? 'RECOVERY MODE // PREVIOUS INCIDENT MARKED ABORTED' : 'SYSTEM NOMINAL // AWAITING MUNDANE CRISIS')
+  const [audioCaption, setAudioCaption] = useState('')
   const [lastReplay, setLastReplay] = useState<ActiveIncident | null>(() => recoveryRun ? recoveredReplay(recoveryRun) : loadReplays()[0] ?? null)
   const [packIssues, setPackIssues] = useState<ValidationIssue[]>([])
   const [stagedPack, setStagedPack] = useState<PackRecord | null>(() => loadStagedPacks()[0] ?? null)
@@ -113,7 +131,7 @@ function CommandCenter() {
   const runtimeRef = useRef<ReturnType<typeof openIncidentRuntime> | null>(null)
   const monotonicStartRef = useRef<number | null>(null)
   const exitRef = useRef<(reason: ActiveIncident['exitReason']) => void>(() => undefined)
-  const triggerGuardRef = useRef(createTriggerGuard())
+  const triggerGuardRef = useRef(createTriggerGuard(defaultSettings.triggerBinding.debounceMs))
 
   const startSpecificIncident = (scenario: Scenario) => {
     const now = Date.now()
@@ -132,7 +150,8 @@ function CommandCenter() {
     setLastReplay(null)
     setView('command')
     setNotice('ALERT DISPATCHED // ALL AVAILABLE RESOURCES ALLOCATED')
-    playAlert(settings.soundEnabled)
+    if (settings.captionsEnabled) setAudioCaption('ALERT TONE // INCIDENT OPENED')
+    playAlert(settings.soundEnabled, settings.effectsVolume)
     void setTheaterMode(true, settings.alwaysOnTop, settings.mirrorSecondary)
     return true
   }
@@ -188,14 +207,14 @@ function CommandCenter() {
     let cancelled = false
     let cleanupNative: (() => Promise<void>) | null = null
     const fallback = (event: KeyboardEvent) => {
-      if (event.ctrlKey && event.shiftKey && event.key.toLowerCase() === 'p') {
+      if (settings.triggerBinding.enabled && matchesConfiguredShortcut(event, settings.triggerBinding.chord)) {
         event.preventDefault()
         triggerRef.current()
       }
       if (event.key === 'Escape' && incidentRef.current && !incidentRef.current.resolved) exitRef.current('EMERGENCY_EXIT')
     }
     window.addEventListener('keydown', fallback)
-    void registerGlobalTrigger(() => triggerRef.current()).then((cleanup) => {
+    void registerGlobalTrigger(() => triggerRef.current(), settings.triggerBinding.chord, settings.triggerBinding.enabled).then((cleanup) => {
       if (cancelled) {
         void cleanup?.()
       } else {
@@ -207,7 +226,7 @@ function CommandCenter() {
       window.removeEventListener('keydown', fallback)
       void cleanupNative?.()
     }
-  }, [])
+  }, [settings.triggerBinding.chord, settings.triggerBinding.enabled])
 
   useEffect(() => {
     if (!recoveryRun) return
@@ -274,7 +293,10 @@ function CommandCenter() {
         runtimeRef.current = updatedRuntime
         persistRuntimeJournal(updatedRuntime, current.startedAt)
         const phaseChanged = updatedRuntime.state.phaseIndex !== current.phaseIndex
-        if (phaseChanged) playAlert(settings.soundEnabled)
+        if (phaseChanged) {
+          playAlert(settings.soundEnabled, settings.effectsVolume)
+          if (settings.captionsEnabled) setAudioCaption(`ALERT TONE // ${updatedRuntime.state.alerts.at(-1) ?? 'ESCALATION EVENT'}`)
+        }
         const updated = projectActiveIncident(updatedRuntime, current.scenario, current.startedAt)
         if (updatedRuntime.state.lifecycle === 'SUMMARY') {
           const completed = { ...updated, resolved: true, exitReason: 'AUTO_DISMISSED' as const, endedAt: Date.now() }
@@ -369,7 +391,7 @@ function CommandCenter() {
   ]
 
   return (
-    <div className={`app-shell ${settings.reducedMotion ? 'reduced-motion' : ''}`} style={{ '--accent': activeScenario.accents[0], '--accent-secondary': activeScenario.accents[1] } as CSSProperties}>
+    <div className={`app-shell ${settings.reducedMotion ? 'reduced-motion' : ''} ${settings.highContrast ? 'high-contrast' : ''}`} style={{ '--accent': activeScenario.accents[0], '--accent-secondary': activeScenario.accents[1] } as CSSProperties}>
       <aside className="sidebar">
         <div className="brand-lockup">
           <div className="brand-mark">PB</div>
@@ -409,7 +431,7 @@ function CommandCenter() {
           </div>
         </header>
 
-        <div className="status-strip"><span className="status-pulse" /> {notice}<span className="strip-right">{new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })} EST</span></div>
+        <div className="status-strip"><span className="status-pulse" /> {notice}{settings.captionsEnabled && audioCaption && <span className="audio-caption" aria-live="polite">[CAPTION: {audioCaption}]</span>}<span className="strip-right">{new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })} EST</span></div>
 
         {view === 'command' && <CommandView incident={incident} scenario={activeScenario} phase={phase} remaining={remaining} progress={progress} elapsed={elapsed} onStart={startIncident} onExit={() => exitIncident('RESOLVED')} onAction={dispatchAction} />}
         {view === 'timeline' && <TimelineView incident={incident ?? lastReplay} onStart={startIncident} onExport={(replay) => {
@@ -478,7 +500,7 @@ function EditorView({ scenario, scenarios, selectedId, issues, stagedPack, onSel
 }
 
 function SettingsView({ settings, onUpdate }: { settings: Settings; onUpdate: (patch: Partial<Settings>) => void }) {
-  return <div className="single-column"><section className="panel detail-panel settings-panel"><PanelHeader title="SYSTEM SETTINGS" tag="LOCAL ONLY" /><div className="settings-form"><div className="setting-section"><span className="classification">TRIGGER</span><h2>How should we overreact?</h2><label><span>GLOBAL HOTKEY LABEL</span><input value={settings.triggerLabel} onChange={(event) => onUpdate({ triggerLabel: event.target.value.toUpperCase() })} /><small>Native Tauri builds register Ctrl + Shift + P by default. USB buttons that emit this key are supported.</small></label><label className="range-label"><span>POST-INCIDENT COOLDOWN <b>{settings.cooldownSeconds}s</b></span><input type="range" min="0" max="30" step="1" value={settings.cooldownSeconds} onChange={(event) => onUpdate({ cooldownSeconds: Number(event.target.value) })} /></label></div><div className="setting-section"><span className="classification">THEATRICS</span><h2>Control the spectacle</h2><label className="range-label"><span>DEFAULT INCIDENT LENGTH <b>{settings.durationSeconds}s</b></span><input type="range" min="15" max="300" step="5" value={settings.durationSeconds} onChange={(event) => onUpdate({ durationSeconds: Number(event.target.value) })} /></label><Toggle label="Alert sounds" checked={settings.soundEnabled} onChange={(checked) => onUpdate({ soundEnabled: checked })} /><Toggle label="Reduced motion" checked={settings.reducedMotion} onChange={(checked) => onUpdate({ reducedMotion: checked })} /><Toggle label="Always on top" checked={settings.alwaysOnTop} onChange={(checked) => onUpdate({ alwaysOnTop: checked })} /><Toggle label="Mirror to secondary displays" checked={settings.mirrorSecondary} onChange={(checked) => onUpdate({ mirrorSecondary: checked })} /></div></div></section></div>
+  return <div className="single-column"><section className="panel detail-panel settings-panel"><PanelHeader title="SYSTEM SETTINGS" tag="LOCAL ONLY" /><div className="settings-form"><div className="setting-section"><span className="classification">TRIGGER</span><h2>How should we overreact?</h2><label><span>TRIGGER CHORD</span><input value={settings.triggerBinding.chord} onChange={(event) => onUpdate({ triggerLabel: event.target.value.toUpperCase(), triggerBinding: { ...settings.triggerBinding, chord: event.target.value } })} /><small>Register one explicit chord only. Keyboard-emulation USB buttons that emit this chord are supported; arbitrary keyboard capture is not.</small></label><Toggle label="Global trigger enabled" checked={settings.triggerBinding.enabled} onChange={(checked) => onUpdate({ triggerBinding: { ...settings.triggerBinding, enabled: checked } })} /><label className="range-label"><span>POST-INCIDENT COOLDOWN <b>{settings.cooldownSeconds}s</b></span><input type="range" min="0" max="30" step="1" value={settings.cooldownSeconds} onChange={(event) => onUpdate({ cooldownSeconds: Number(event.target.value) })} /></label></div><div className="setting-section"><span className="classification">THEATRICS</span><h2>Control the spectacle</h2><label className="range-label"><span>DEFAULT INCIDENT LENGTH <b>{settings.durationSeconds}s</b></span><input type="range" min="15" max="300" step="5" value={settings.durationSeconds} onChange={(event) => onUpdate({ durationSeconds: Number(event.target.value) })} /></label><Toggle label="Alert sounds" checked={settings.soundEnabled} onChange={(checked) => onUpdate({ soundEnabled: checked })} /><label className="range-label"><span>EFFECTS VOLUME <b>{Math.round(settings.effectsVolume * 100)}%</b></span><input type="range" min="0" max="1" step="0.05" value={settings.effectsVolume} onChange={(event) => onUpdate({ effectsVolume: Number(event.target.value) })} /></label><Toggle label="Captions / audio transcripts" checked={settings.captionsEnabled} onChange={(checked) => onUpdate({ captionsEnabled: checked })} /><Toggle label="Reduced motion" checked={settings.reducedMotion} onChange={(checked) => onUpdate({ reducedMotion: checked })} /><Toggle label="High contrast" checked={settings.highContrast} onChange={(checked) => onUpdate({ highContrast: checked })} /><Toggle label="Always on top" checked={settings.alwaysOnTop} onChange={(checked) => onUpdate({ alwaysOnTop: checked })} /><Toggle label="Mirror to secondary displays" checked={settings.mirrorSecondary} onChange={(checked) => onUpdate({ mirrorSecondary: checked })} /></div></div></section></div>
 }
 
 function Toggle({ label, checked, onChange }: { label: string; checked: boolean; onChange: (value: boolean) => void }) { return <button className={`toggle-row ${checked ? 'checked' : ''}`} onClick={() => onChange(!checked)}><span>{label}</span><span className="toggle"><i /></span></button> }

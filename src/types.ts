@@ -61,6 +61,7 @@ export type Scenario = {
   maxScheduledEvents?: number
   resolutionRules?: Array<{ id: string; when?: ScenarioCondition; text: string }>
   presentationProfile?: PresentationProfile
+  audio?: AudioCue[]
 }
 
 export type PresentationProfile = {
@@ -68,6 +69,15 @@ export type PresentationProfile = {
   maxAlertsPerMinute?: number
   reducedMotionSafe?: boolean
   captionsRequired?: boolean
+}
+
+export type AudioCue = {
+  id: string
+  kind: 'siren' | 'radio' | 'alert' | 'stinger'
+  caption: string
+  assetId?: string
+  durationMs: number
+  volume?: number
 }
 
 export type ScenarioNodeType = 'PHASE' | 'WAIT' | 'ALERT' | 'REPORT' | 'RESOURCE_MUTATION' | 'MARKER_MUTATION' | 'CHOICE' | 'CONDITION' | 'RANDOM_CHOICE' | 'OBJECTIVE' | 'TERMINAL'
@@ -218,6 +228,20 @@ export type Settings = {
   autoStart: boolean
   cooldownSeconds: number
   mirrorSecondary: boolean
+  triggerBinding: TriggerBinding
+  alertVolume: number
+  musicVolume: number
+  effectsVolume: number
+  captionsEnabled: boolean
+  highContrast: boolean
+}
+
+export type TriggerBinding = {
+  id: string
+  type: 'keyboard_shortcut' | 'hid_keyboard_alias' | 'app_button'
+  chord: string
+  enabled: boolean
+  debounceMs: number
 }
 
 export type IncidentLifecycle = 'IDLE' | 'ARMING' | 'ACTIVE' | 'RESOLVING' | 'SUMMARY' | 'ABORTED' | 'RECOVERING' | 'CORRUPT'
