@@ -431,7 +431,7 @@ function CommandCenter() {
           </div>
         </header>
 
-        <div className="status-strip"><span className="status-pulse" /> {notice}{settings.captionsEnabled && audioCaption && <span className="audio-caption" aria-live="polite">[CAPTION: {audioCaption}]</span>}<span className="strip-right">{new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })} EST</span></div>
+        <div className="status-strip"><span className="status-pulse" /> {notice}{settings.captionsEnabled && audioCaption && <span className="audio-caption" aria-live="polite">[CAPTION: {audioCaption}]</span>}<span className="strip-right">{new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}</span></div>
 
         {view === 'command' && <CommandView incident={incident} scenario={activeScenario} phase={phase} remaining={remaining} progress={progress} elapsed={elapsed} onStart={startIncident} onExit={() => exitIncident('RESOLVED')} onAction={dispatchAction} />}
         {view === 'timeline' && <TimelineView incident={incident ?? lastReplay} onStart={startIncident} onExport={(replay) => {
