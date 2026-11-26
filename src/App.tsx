@@ -82,7 +82,7 @@ function SurveillanceMirror() {
     const timer = window.setInterval(() => void poll(), 350)
     return () => { cancelled = true; window.clearInterval(timer) }
   }, [])
-  return <div className="mirror-shell"><div className="mirror-topline"><span className="live-dot" /> SECONDARY SURVEILLANCE FEED <strong>SIMULATED DATA</strong></div><div className="mirror-grid"><div className="mirror-radar"><span className="mirror-crosshair" /><span className="mirror-sweep" /></div><div className="mirror-copy"><span className="classification">REMOTE DISPLAY // AUXILIARY COMMAND</span><h1>{projection.scenarioId ? `LIVE // ${projection.scenarioId.replaceAll('-', ' ').toUpperCase()}` : 'OPERATIONAL THEATER ACTIVE'}</h1><p>This display is a theatrical projection of the primary incident state. All imagery, coordinates, and telemetry are simulated.</p><div className="mirror-status"><span>UPLINK</span><b>{projection.lifecycle ?? 'STANDBY'}</b><span>PHASE</span><b>{projection.phaseIndex === undefined ? '—' : String(projection.phaseIndex + 1).padStart(2, '0')}</b><span>MARKERS</span><b>{projection.markerCount ?? 0}</b></div></div></div><div className="mirror-footer">HIDDEN CANOPY // PANIC BUTTON // OFFLINE CORE // ESC REMAINS THE EMERGENCY EXIT</div></div>
+  return <div className="mirror-shell"><div className="mirror-topline"><span className="live-dot" /> SECONDARY PARTY GAME DISPLAY <strong>SIMULATED DATA</strong></div><div className="mirror-grid"><div className="mirror-radar"><span className="mirror-crosshair" /><span className="mirror-sweep" /></div><div className="mirror-copy"><span className="classification">REMOTE DISPLAY // AUXILIARY COMMAND</span><h1>{projection.scenarioId ? `LIVE // ${projection.scenarioId.replaceAll('-', ' ').toUpperCase()}` : 'OPERATIONAL THEATER ACTIVE'}</h1><p>This display is a theatrical projection of the primary incident state. All imagery, coordinates, and telemetry are simulated. This is a party game, not a real emergency service.</p><div className="mirror-status"><span>UPLINK</span><b>{projection.lifecycle ?? 'STANDBY'}</b><span>PHASE</span><b>{projection.phaseIndex === undefined ? '—' : String(projection.phaseIndex + 1).padStart(2, '0')}</b><span>MARKERS</span><b>{projection.markerCount ?? 0}</b></div></div></div><div className="mirror-footer">HIDDEN CANOPY // PANIC BUTTON // OFFLINE CORE // ESC REQUESTS DISPLAY DISMISSAL // END GAME IN MAIN WINDOW</div></div>
 }
 
 function CommandCenter() {
@@ -397,7 +397,7 @@ function CommandCenter() {
           <div className="brand-mark">PB</div>
           <div>
             <div className="brand-name">PANIC BUTTON</div>
-            <div className="brand-subtitle">DOMESTIC INCIDENT COMMAND</div>
+            <div className="brand-subtitle">FICTIONAL PARTY GAME</div>
           </div>
         </div>
         <div className="system-badge"><span className="live-dot" /> SYSTEM ONLINE</div>
@@ -423,7 +423,7 @@ function CommandCenter() {
 
       <main className="main-content">
         <header className="topbar">
-          <div><span className="eyebrow">HIDDEN CANOPY // OPERATIONS DESK</span><h1>{incidentLabel}</h1></div>
+          <div><span className="eyebrow">HIDDEN CANOPY // FICTIONAL PARTY GAME</span><h1>{incidentLabel}</h1></div>
           <div className="topbar-actions">
             <span className="offline-pill"><span className="offline-dot" /> OFFLINE CORE</span>
             <button className="icon-button" onClick={() => updateSettings({ soundEnabled: !settings.soundEnabled })} aria-label={settings.soundEnabled ? 'Mute alerts' : 'Enable alerts'}>{settings.soundEnabled ? '◖)' : '×)'}</button>
